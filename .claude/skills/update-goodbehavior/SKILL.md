@@ -33,9 +33,15 @@ and reported; locally-missing tracked files are **restored**. It refreshes the m
 
 Your judgment on top of the report:
 - **Conflicts** — walk the user through each marked file; don't resolve silently.
-- **Upstream additions** (files in `NEW` under the bundle paths but absent from the manifest — e.g. a new skill or
-  profile): the script doesn't auto-add; decide with the user, then copy + add a manifest entry (or re-run
-  `install.js` with just the additions in the plan).
+- **Upstream additions** (files in `NEW` under the bundle paths but absent from the manifest — e.g. a new skill,
+  profile, **or hook**): the script doesn't auto-add; decide with the user, then copy + add a manifest entry (or
+  re-run `install.js` with just the additions in the plan). **A new hook is the one addition that also needs
+  wiring**, not just a file copy — re-run `install.js` with a plan naming only the new hook (empty `skills`/
+  `profiles`/`templates`, `"hooks": ["<new-hook-name>"]`) against the already-adopted target. Because `install.js`
+  never clobbers existing files and `wireSettings()` dedupes per hook filename, this is safe to run against a live
+  project: it copies the new hook, chmods it, adds its manifest entry, and adds only its own `settings.json` entry —
+  every already-wired hook, and any locally-adapted skill/profile file, is left untouched. `update.js` stays
+  settings-agnostic by design (see below); wiring a new hook is always an `install.js` job, never `update.js`'s.
 - **Upstream removals** — the script kept them; deleting is the user's call.
 - **Script missing** (an old source): fall back to performing the same steps by hand with `git show` + `git merge-file`,
   preserving the exact statuses above.

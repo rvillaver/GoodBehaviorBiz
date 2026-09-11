@@ -1,0 +1,526 @@
+#!/usr/bin/env node
+/*
+ * GoodBehavior guard-bash — a PreToolUse hook (matcher: Bash) that denies a small set of hard-shape
+ * commands outright, and audits every decision (allow and deny) it makes.
+ *
+ * This is the fast-lane net: Claude Code's own permission system (rules, sandbox, managed settings)
+ * is the first line. This hook adds only what native can't do — a blocklist scan that still fires
+ * under bypassPermissions, since hooks run regardless of permission mode.
+ *
+ * Fail CLOSED (opposite of done-gate, which fails open on purpose): malformed stdin, or any error
+ * anywhere in the decision path, denies the command. The audit entry is written before the decision
+ * is returned. Deny reasons never echo the raw matched command text (redaction discipline for the
+ * future injection layer) — only the named shape.
+ *
+ * Protocol: PreToolUse decisions use the permissionDecision JSON on stdout (not the exit-code
+ * convention done-gate uses for Stop). Always exits 0; the JSON carries the verdict.
+ */
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+
+const SHELL_EXECS = new Set(["sh", "bash", "zsh", "ksh", "dash", "ash", "csh", "tcsh", "source"]);
+const NC_NAMES = new Set(["nc", "ncat", "netcat", "nc.traditional", "nc.openbsd"]);
+const WRITE_VERBS = new Set(["rm", "mv", "cp", "tee", "dd", "truncate", "ln", "touch", "mkdir", "rmdir", "chmod", "chown"]);
+// POSIX-only (Windows deferred — PRODUCTION-BACKLOG.md). Shared by the rm-shape check (Phase 1) and the
+// zone classifier (Phase 3) so the two never drift apart.
+const SYSTEM_PREFIXES = ["/etc", "/usr", "/bin", "/sbin", "/var", "/boot", "/System", "/Library", "/private", "/root"];
+const HOME = os.homedir();
+// The OS temp dir commonly resolves UNDER a system prefix (macOS: os.tmpdir() -> /var/folders/... ->
+// realpath /private/var/folders/...), which collides with "/var"/"/private" in SYSTEM_PREFIXES. Checked
+// before the system-prefix test so temp-dir paths don't misclassify as "system" (BlitzPi's zones.ts has the
+// exact same collision and resolves it the same way — scratch checked first).
+const SCRATCH_DIRS = (() => {
+  const out = new Set();
+  for (const d of [os.tmpdir(), "/tmp"]) {
+    out.add(path.posix.normalize(d));
+    try { out.add(fs.realpathSync(d)); } catch (e) { /* absent on this platform */ }
+  }
+  return [...out];
+})();
+const UNRESOLVED_EXPANSION = /[$`]/; // an unexpanded shell expansion in a path — can't be known, treat conservatively
+
+// ---- command parsing (quote-aware, just enough to avoid tripping on quoted strings) ----
+
+function splitStatements(cmd) {
+  // Splits on unquoted ; && || | & \n, keeping original text (including quotes) per segment.
+  const stmts = [];
+  let cur = "";
+  let sep = null;
+  let inS = false;
+  let inD = false;
+  let i = 0;
+  const n = cmd.length;
+  const push = () => { stmts.push({ sep, text: cur }); cur = ""; };
+  while (i < n) {
+    const c = cmd[i];
+    if (inS) {
+      cur += c;
+      if (c === "'") inS = false;
+      i++; continue;
+    }
+    if (inD) {
+      if (c === "\\" && i + 1 < n) { cur += c + cmd[i + 1]; i += 2; continue; }
+      cur += c;
+      if (c === '"') inD = false;
+      i++; continue;
+    }
+    if (c === "'") { inS = true; cur += c; i++; continue; }
+    if (c === '"') { inD = true; cur += c; i++; continue; }
+    if (c === "\\" && i + 1 < n) { cur += c + cmd[i + 1]; i += 2; continue; }
+    if (c === "&" && cmd[i + 1] === "&") { push(); sep = "&&"; i += 2; continue; }
+    if (c === "|" && cmd[i + 1] === "|") { push(); sep = "||"; i += 2; continue; }
+    if (c === ";" || c === "|" || c === "&" || c === "\n") { push(); sep = c; i++; continue; }
+    cur += c; i++;
+  }
+  push();
+  return stmts;
+}
+
+function splitWords(text) {
+  const words = [];
+  let cur = "";
+  let inS = false;
+  let inD = false;
+  let i = 0;
+  const n = text.length;
+  const flush = () => { if (cur !== "") { words.push(cur); cur = ""; } };
+  while (i < n) {
+    const c = text[i];
+    if (inS) { cur += c; if (c === "'") inS = false; i++; continue; }
+    if (inD) {
+      if (c === "\\" && i + 1 < n) { cur += c + text[i + 1]; i += 2; continue; }
+      cur += c; if (c === '"') inD = false; i++; continue;
+    }
+    if (c === "'") { inS = true; cur += c; i++; continue; }
+    if (c === '"') { inD = true; cur += c; i++; continue; }
+    if (c === "\\" && i + 1 < n) { cur += c + text[i + 1]; i += 2; continue; }
+    if (/\s/.test(c)) { flush(); i++; continue; }
+    cur += c; i++;
+  }
+  flush();
+  return words;
+}
+
+function unquote(tok) {
+  if (tok.length >= 2) {
+    const f = tok[0];
+    const l = tok[tok.length - 1];
+    if ((f === '"' && l === '"') || (f === "'" && l === "'")) return tok.slice(1, -1);
+  }
+  return tok;
+}
+
+function unquotedSubstringPresent(cmd, needle) {
+  let inS = false;
+  let inD = false;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (inS) { if (c === "'") inS = false; continue; }
+    if (inD) {
+      if (c === "\\") { i++; continue; }
+      if (c === '"') inD = false;
+      continue;
+    }
+    if (c === "'") { inS = true; continue; }
+    if (c === '"') { inD = true; continue; }
+    if (c === "\\") { i++; continue; }
+    if (cmd.startsWith(needle, i)) return true;
+  }
+  return false;
+}
+
+function parseCommand(words) {
+  let i = 0;
+  while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++;
+  if (i >= words.length) return null;
+  const parts = words[i].split("/");
+  const cmd = parts[parts.length - 1] || words[i];
+  return { cmd, args: words.slice(i + 1) };
+}
+
+// ---- shape checks ----
+
+function hasExecFlag(args) {
+  return args.some((a) => {
+    if (a === "--exec" || a === "--sh-exec") return true;
+    if (/^-[a-zA-Z]+$/.test(a)) return a.slice(1).includes("e");
+    return false;
+  });
+}
+
+function isDangerousPath(tok) {
+  if (tok === "/") return true;
+  const t = tok.replace(/\/+$/, "");
+  if (t === "") return false;
+  const exact = new Set(["/", "~", "$HOME", "${HOME}", "/*"]);
+  if (exact.has(t)) return true;
+  return SYSTEM_PREFIXES.includes(t);
+}
+
+function isRecursiveForceDelete(args) {
+  let hasR = false;
+  let hasF = false;
+  const targets = [];
+  for (const a of args) {
+    if (a === "--recursive") hasR = true;
+    else if (a === "--force") hasF = true;
+    else if (/^-[a-zA-Z]+$/.test(a)) {
+      if (a.includes("r") || a.includes("R")) hasR = true;
+      if (a.includes("f")) hasF = true;
+    } else if (!a.startsWith("-")) {
+      targets.push(a);
+    }
+  }
+  return hasR && hasF && targets.some(isDangerousPath);
+}
+
+function stdoutDownload(cmd, args) {
+  if (cmd === "curl") {
+    for (const a of args) {
+      if (a === "-o" || a === "-O" || a === "--output") return false;
+      if (a[0] === "-" && a[1] !== "-" && /^-\w*[oO]\w*$/.test(a)) return false;
+    }
+    return true;
+  }
+  if (cmd === "wget") {
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === "--output-document=-") return true;
+      if (a === "-O" && args[i + 1] === "-") return true;
+      // combined short flags ending in O- (e.g. -qO-, the common "wget -qO- url | sh" idiom)
+      if (/^-[a-zA-Z]*O-$/.test(a)) return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+function detectShape(command) {
+  if (!command || typeof command !== "string") return null;
+  if (unquotedSubstringPresent(command, "/dev/tcp/") || unquotedSubstringPresent(command, "/dev/udp/")) {
+    return "reverse-shell";
+  }
+  const stmts = splitStatements(command);
+  let chainHasDownload = false;
+  for (const { sep, text } of stmts) {
+    if (sep !== "|") chainHasDownload = false;
+    const words = splitWords(text).map(unquote);
+    const parsed = parseCommand(words);
+    if (!parsed) continue;
+    const { cmd, args } = parsed;
+    if (cmd === "sudo" || cmd === "doas") return "sudo-doas";
+    if (NC_NAMES.has(cmd) && hasExecFlag(args)) return "reverse-shell";
+    if (cmd === "rm" && isRecursiveForceDelete(args)) return "recursive-delete-protected-path";
+    if ((cmd === "curl" || cmd === "wget") && stdoutDownload(cmd, args)) {
+      chainHasDownload = true;
+    } else if (SHELL_EXECS.has(cmd) && chainHasDownload) {
+      return "download-piped-to-shell";
+    }
+  }
+  return null;
+}
+
+// ---- zones and targets (Phase 3): what does this command touch, once it's past the hard-shape check? ----
+
+/** Splits on the same operators as splitStatements, PLUS `( … )` subshell scoping for cwd (a `cd` inside
+ *  parens doesn't leak to what follows), and tracks the absolute directory each statement runs in after any
+ *  preceding `cd`. `cwd` starts at `startCwd` (the project root) and is always an absolute POSIX path string. */
+function segmentsWithCwd(command, startCwd) {
+  const segs = [];
+  const stack = [];
+  let cwd = startCwd;
+  let cur = "";
+  let inS = false;
+  let inD = false;
+  let i = 0;
+  const n = command.length;
+  const applyCd = (text) => {
+    const words = splitWords(text).map(unquote);
+    const parsed = parseCommand(words);
+    if (!parsed || parsed.cmd !== "cd") return;
+    const rest = parsed.args.filter((a) => a !== "--");
+    const arg = rest.length ? rest[0] : "~"; // bare `cd` goes home
+    if (arg === "-" || UNRESOLVED_EXPANSION.test(arg)) return; // `cd -` / `cd "$var"` — can't know, leave cwd as-is
+    if (arg === "~" || arg === "~/") { cwd = HOME; return; }
+    if (arg.startsWith("~/")) { cwd = path.posix.join(HOME, arg.slice(2)); return; }
+    if (arg.startsWith("/")) { cwd = path.posix.normalize(arg); return; }
+    cwd = path.posix.normalize(path.posix.join(cwd, arg));
+  };
+  const push = () => { const text = cur; segs.push({ text, cwd }); cur = ""; applyCd(text); };
+  while (i < n) {
+    const c = command[i];
+    if (inS) { cur += c; if (c === "'") inS = false; i++; continue; }
+    if (inD) {
+      if (c === "\\" && i + 1 < n) { cur += c + command[i + 1]; i += 2; continue; }
+      cur += c; if (c === '"') inD = false; i++; continue;
+    }
+    if (c === "'") { inS = true; cur += c; i++; continue; }
+    if (c === '"') { inD = true; cur += c; i++; continue; }
+    if (c === "\\" && i + 1 < n) { cur += c + command[i + 1]; i += 2; continue; }
+    if (c === "(") { push(); stack.push(cwd); i++; continue; }
+    if (c === ")") { push(); cwd = stack.length ? stack.pop() : cwd; i++; continue; }
+    if (c === "&" && command[i + 1] === "&") { push(); i += 2; continue; }
+    if (c === "|" && command[i + 1] === "|") { push(); i += 2; continue; }
+    if (c === ";" || c === "|" || c === "&" || c === "\n") { push(); i++; continue; }
+    cur += c; i++;
+  }
+  push();
+  return segs;
+}
+
+/** `~`/`$HOME` expansion (against the REAL home — GoodBehaviorBiz doesn't sandbox, so `~` really is `~`)
+ *  then resolution against the statement's cwd. A target still carrying an unresolved `$`/backtick expansion
+ *  is returned as-is with unresolved:true — never guessed into looking safe. */
+function resolveTarget(raw, cwd) {
+  let t = raw;
+  if (t === "~" || t === "~/") t = HOME;
+  else if (t.startsWith("~/")) t = path.posix.join(HOME, t.slice(2));
+  else {
+    const m = /^(?:\$\{HOME\}|\$HOME)(?=$|\/)/.exec(t);
+    if (m) t = path.posix.join(HOME, t.slice(m[0].length));
+  }
+  if (UNRESOLVED_EXPANSION.test(t)) return { path: t, unresolved: true };
+  if (t.startsWith("/")) return { path: path.posix.normalize(t), unresolved: false };
+  return { path: path.posix.normalize(path.posix.join(cwd, t)), unresolved: false };
+}
+
+const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`;|&)<>]*/gi;
+
+/** Same length as `text`; quoted-interior chars become "Q" (delimiters and unquoted chars pass through). Used to
+ *  find safe match POSITIONS for the two path regexes below without a real command word/arg tokenizer — content
+ *  is then read back from the ORIGINAL text at those positions, so a value is never taken from inside a quote
+ *  (a commit message quoting "/dev/tcp/" must not read as a path any more than it reads as a reverse-shell shape). */
+function maskQuoted(text) {
+  let out = "";
+  let inS = false;
+  let inD = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inS) { out += c === "'" ? c : "Q"; if (c === "'") inS = false; continue; }
+    if (inD) {
+      if (c === "\\" && i + 1 < text.length) { out += "QQ"; i++; continue; }
+      out += c === '"' ? c : "Q";
+      if (c === '"') inD = false;
+      continue;
+    }
+    if (c === "'") { inS = true; out += c; continue; }
+    if (c === '"') { inD = true; out += c; continue; }
+    if (c === "\\" && i + 1 < text.length) { out += text[i] + text[i + 1]; i++; continue; }
+    out += c;
+  }
+  return out;
+}
+
+/** The absolute/~ paths a command names, and whether each is a write target — statement-cwd aware. Not a full
+ *  shell parser: write detection covers redirections, the write-verb list, and curl/wget output files; any
+ *  other absolute/~/../ path mentioned is a read. URLs are stripped first so `https://host/path` is never
+ *  misread as the path `//host/path`. */
+function extractTargets(command, projectRootAbs) {
+  const stripped = command.replace(URL_RE, (u) => " ".repeat(u.length));
+  const segs = segmentsWithCwd(stripped, projectRootAbs);
+  const targets = new Map(); // resolved path -> { write, unresolved }
+  const add = (raw, write, cwd) => {
+    const r = resolveTarget(raw, cwd);
+    const prev = targets.get(r.path);
+    targets.set(r.path, { write: (prev && prev.write) || write, unresolved: r.unresolved });
+  };
+  for (const { text, cwd } of segs) {
+    if (!text.trim()) continue;
+    const masked = maskQuoted(text);
+
+    const redir = /(^|[^0-9<>&])>>?\s*("?~?\/?[^\s"';|&)]+)/gd;
+    let m;
+    while ((m = redir.exec(masked))) {
+      const [gs, ge] = m.indices[2];
+      add(text.slice(gs, ge).replace(/^["']|["']$/g, ""), true, cwd);
+    }
+
+    const words = splitWords(text).map(unquote);
+    const parsed = parseCommand(words);
+    if (parsed && WRITE_VERBS.has(parsed.cmd)) {
+      const outside = cwd !== projectRootAbs; // a relative arg counts once the statement has cd'd out of the project
+      for (const tok of parsed.args) {
+        if (!tok || tok.startsWith("-")) continue;
+        if (/^[~/]/.test(tok) || tok.includes("../") || outside) add(tok, true, cwd);
+      }
+    }
+    if (parsed && parsed.cmd === "curl") {
+      for (let k = 0; k < parsed.args.length; k++) {
+        if ((parsed.args[k] === "-o" || parsed.args[k] === "--output") && parsed.args[k + 1]) { add(parsed.args[k + 1], true, cwd); k++; }
+      }
+    }
+    if (parsed && parsed.cmd === "wget") {
+      for (let k = 0; k < parsed.args.length; k++) {
+        const a = parsed.args[k];
+        if ((a === "-O" || a === "-o" || a === "--output-document") && parsed.args[k + 1] && parsed.args[k + 1] !== "-") { add(parsed.args[k + 1], true, cwd); k++; }
+      }
+    }
+
+    // `cd`'s own destination is not a "read" — cwd-tracking already accounts for it, and flagging every plain
+    // `cd /elsewhere` would ask on mere navigation before anything is actually touched there.
+    if (!(parsed && parsed.cmd === "cd")) {
+      const any = /(?:^|[\s=:,"'`(><|&])((?:~|\/)[^\s"'`;|&)<>]*|\.\.\/[^\s"'`;|&)<>]*)/gd;
+      while ((m = any.exec(masked))) {
+        const [gs, ge] = m.indices[1];
+        const r = resolveTarget(text.slice(gs, ge), cwd);
+        if (!targets.has(r.path)) targets.set(r.path, { write: false, unresolved: r.unresolved });
+      }
+    }
+  }
+  return [...targets.entries()].map(([p, v]) => ({ path: p, write: v.write, unresolved: v.unresolved }));
+}
+
+/** project / project-adjacent (sibling of the project root) / system / home (catch-all — the common case, and
+ *  also where any other stray absolute path lands: never assume "project" for something we're unsure about). */
+function classifyZone(absPath, projectRootAbs) {
+  const p = path.posix.normalize(absPath);
+  const under = (root) => p === root || p.startsWith(root + "/");
+  if (under(projectRootAbs)) return "project";
+  if (SCRATCH_DIRS.some(under)) return "home"; // temp-dir space is not system-owned — see SCRATCH_DIRS comment
+  if (SYSTEM_PREFIXES.some((pre) => p === pre || p.startsWith(pre + "/"))) return "system";
+  const parent = path.posix.dirname(projectRootAbs);
+  if (parent !== projectRootAbs && under(parent)) return "project-adjacent";
+  return "home";
+}
+
+/** project (any action) is silent — the normal case. A sibling project READ is common (shared code, imports)
+ *  and also silent. Everything else — sibling WRITEs, anything under home, anything under system — is gray:
+ *  guarded lane asks, fast lane allows + audits (hard shapes deny in both, already handled before this runs). */
+function isGray(write, zone) {
+  if (zone === "project") return false;
+  if (zone === "project-adjacent" && !write) return false;
+  return true;
+}
+
+/** The project's own recorded lane (adopt-goodbehavior's "Confirmed lane" step) — NOT a live read of the
+ *  session's actual permission mode, which hooks are never told (PreToolUse stdin carries no such field).
+ *  Defaults to "guarded", the safer posture, if settings.json is missing/unreadable/says nothing. */
+function readLane(cwd) {
+  try {
+    const base = process.env.CLAUDE_PROJECT_DIR || cwd || process.cwd();
+    const settings = JSON.parse(fs.readFileSync(path.join(base, ".claude", "settings.json"), "utf8"));
+    if (settings.permissions && settings.permissions.defaultMode === "bypassPermissions") return "fast";
+  } catch (e) { /* no settings.json, or unreadable — guarded is the safe default */ }
+  return "guarded";
+}
+
+// ---- audit ----
+
+function auditPath(cwd) {
+  const base = process.env.CLAUDE_PROJECT_DIR || cwd || process.cwd();
+  const dir = path.join(base, ".claude", "goodbehavior", "audit");
+  const day = new Date().toISOString().slice(0, 10);
+  return path.join(dir, `${day}.jsonl`);
+}
+
+function writeAudit(cwd, entry) {
+  try {
+    const p = auditPath(cwd);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.appendFileSync(p, JSON.stringify(entry) + "\n");
+  } catch (e) {
+    // Best-effort: an audit-write failure must never block the decision path from completing.
+  }
+}
+
+// ---- decision output ----
+
+function emitDecision(permissionDecision, reason) {
+  const out = {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision,
+      permissionDecisionReason: reason,
+    },
+  };
+  try { process.stdout.write(JSON.stringify(out)); } catch (e) { /* noop */ }
+}
+function emitDeny(reason) { emitDecision("deny", reason); }
+function emitAsk(reason) { emitDecision("ask", reason); }
+
+function denyClosed(reason, cwd, sessionId) {
+  writeAudit(cwd, {
+    timestamp: new Date().toISOString(),
+    tool: "Bash",
+    shape: `guard-error:${reason}`,
+    decision: "deny",
+    session_id: sessionId,
+  });
+  emitDeny(`GoodBehavior guard-bash: failing closed (${reason}) — could not evaluate the command safely, so it is denied.`);
+  process.exit(0);
+}
+
+function main(input) {
+  if (process.env.GUARD_BASH_TEST_FORCE_THROW) throw new Error("forced test throw");
+  const toolName = input.tool_name || "";
+  if (toolName !== "Bash") { process.exit(0); return; }
+  const command = (input.tool_input && input.tool_input.command) || "";
+  const cwd = input.cwd || process.cwd();
+  const sessionId = input.session_id || null;
+  const root = process.env.CLAUDE_PROJECT_DIR || cwd || process.cwd();
+
+  const shape = detectShape(command);
+  if (shape) {
+    writeAudit(cwd, { timestamp: new Date().toISOString(), tool: "Bash", shape, decision: "deny", session_id: sessionId });
+    emitDeny(
+      `GoodBehavior guard-bash: blocked — matched hard shape "${shape}". This command is denied outright in ` +
+      "the fast lane; the guard is a blocklist net, not a sandbox."
+    );
+    process.exit(0);
+  }
+
+  // Past the hard shapes: does this command touch somewhere outside the project? (Phase 3 zone ladder.)
+  let notable = null; // {zone, write, path} — the most notable target found, if any
+  for (const t of extractTargets(command, root)) {
+    const zone = t.unresolved ? "home" : classifyZone(t.path, root);
+    if (!isGray(t.write, zone)) continue;
+    if (!notable) notable = { zone, write: t.write, path: t.path };
+    if (zone === "system") { notable = { zone, write: t.write, path: t.path }; break; } // most severe — stop looking
+  }
+
+  if (!notable) {
+    writeAudit(cwd, { timestamp: new Date().toISOString(), tool: "Bash", shape: null, decision: "allow", zone: "project", session_id: sessionId });
+    process.exit(0);
+  }
+
+  const lane = readLane(cwd);
+  if (lane === "guarded") {
+    writeAudit(cwd, {
+      timestamp: new Date().toISOString(), tool: "Bash", shape: null, decision: "ask",
+      zone: notable.zone, write: notable.write, session_id: sessionId,
+    });
+    emitAsk(
+      `GoodBehavior guard-bash: this command ${notable.write ? "writes to" : "reads from"} "${notable.path}", ` +
+      `outside the project (${notable.zone} zone) — confirm before proceeding.`
+    );
+    process.exit(0);
+  }
+
+  // fast lane: gray zones allow + audit (hard shapes already denied above)
+  writeAudit(cwd, {
+    timestamp: new Date().toISOString(), tool: "Bash", shape: null, decision: "allow",
+    zone: notable.zone, write: notable.write, session_id: sessionId,
+  });
+  process.exit(0);
+}
+
+let buf = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (c) => { buf += c; });
+process.stdin.on("end", () => {
+  let input = null;
+  try {
+    try {
+      input = JSON.parse(buf);
+    } catch (e) {
+      denyClosed("malformed-stdin", null, null);
+      return;
+    }
+    main(input);
+  } catch (e) {
+    denyClosed("internal-error", (input && input.cwd) || null, (input && input.session_id) || null);
+  }
+});

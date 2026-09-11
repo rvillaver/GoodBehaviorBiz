@@ -10,6 +10,9 @@
 #   - self-dev scratch (docs/)                       — local only, may name projects
 docs/
 
+# guard-bash audit trail — runtime decisions for this checkout, not distributable history
+.claude/goodbehavior/audit/
+
 # python bytecode
 __pycache__/
 *.pyc

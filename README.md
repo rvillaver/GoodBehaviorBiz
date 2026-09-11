@@ -1,10 +1,11 @@
 # GoodBehaviorBiz
 
-> **GoodBehaviorBiz** evolves the Claude-native GoodBehavior: the same disciplined method, plus a security layer that
-> routes **every command surface** (skills, the done-gate hook, the install/update scripts, chat-agents) through
-> **BlitzPi-style guardrails** — threat-detection · access-profiles · governance · sandbox · audit — so no surface
-> executes unguarded. Gates and mechanics are **plain Node (Python-free)**. The guardrail fusion is the tracked build
-> (see `docs/plans/ROADMAP.md`); the method below is inherited as-is.
+> **GoodBehaviorBiz** evolves the Claude-native GoodBehavior: the same disciplined method, plus a **guard layer** so
+> your Claude can build at full speed — including on `bypassPermissions` — while a small set of hard-dangerous
+> command shapes still gets blocked outright, anything reaching outside the project gets asked about (or, in the
+> fast lane, allowed and logged), and content carrying a named prompt-injection shape gets flagged rather than
+> followed. Claude-native, zero dependencies, plain Node (Python-free) — see [The guard layer](#the-guard-layer)
+> below for what it actually covers and the honest limits of a blocklist.
 
 A portable Claude Code bundle that installs a **disciplined working method** into any project: audit before building,
 a gated build loop, verify the real thing (not a proxy), record learnings so they don't decay, and report honestly —
@@ -35,9 +36,13 @@ its files.
 | `/uatplan-goodbehavior` | Builds/maintains a living manual UAT plan — feature map + how to test each + pass/fail checklist. Feeds verify. | skill |
 | `/learn-goodbehavior` | Writes a durable learning to memory (so it's not relearned). | skill |
 | `/update-goodbehavior` | Pulls the latest bundle from its source repo and 3-way-merges it into the local copy, preserving project-local adaptations. | skill |
+| `/report-goodbehavior` | Turns the guard's audit trail into an owner-readable digest — what ran, what got blocked or flagged and why, over a period. | skill |
 | `.claude/hooks/done-gate.js` + `.claude/settings.json` | Stop hook: pushes back on "done" without evidence — including *behaviorally*: verification vocabulary is honored only if something was actually run/observed after the last file change that turn. | enforcement |
-| `scripts/install.js` · `scripts/update.js` | The mechanical halves of adopt/update, deterministic: copy+hash+wire+manifest, and the git 3-way merge. The skills keep the judgment; the scripts keep the consistency. | tooling |
-| `tests/run_all.js` | The bundle held to its own standard: hook behavior, install round-trip, update merge paths, structural+drift lint — one command, all green before shipping. | self-test |
+| `.claude/hooks/guard-bash.js` | `PreToolUse`/`Bash` hook: denies a small set of hard-dangerous shapes outright (sudo/doas, download-piped-to-shell, reverse shell, recursive delete of root, home, or system); past that, a zone ladder decides per command target — silent in-project, asked (guarded lane) or allowed-and-audited (fast lane) everywhere else. | enforcement |
+| `.claude/hooks/guard-injection.js` | `UserPromptSubmit` + `PostToolUse`(`Read`\|`WebFetch`) hook: flags content matching a named prompt-injection shape — never blocks, never drops a prompt. | enforcement |
+| `scripts/install.js` · `scripts/update.js` · `scripts/report.js` | The mechanical halves of adopt/update/report, deterministic: copy+hash+wire+manifest, the git 3-way merge, and audit JSONL aggregation. The skills keep the judgment; the scripts keep the consistency. | tooling |
+| `templates/managed-settings.json` + `templates/OWNER-SETUP.md` | Machine-wide, owner-enforced deployment: hooks a project can't shed, bypass mode locked off. Not installed by `/adopt-goodbehavior` — a separate, admin-driven setup. | enforcement |
+| `tests/run_all.js` | The bundle held to its own standard: hook/guard/injection/report behavior, install round-trip, update merge paths, structural+drift lint — one command, all green before shipping. | self-test |
 
 Guidance shapes intent; **only the hook enforces** when intent slips. That's the point — the method failed before
 precisely because nothing stopped a lazy turn.
@@ -77,6 +82,28 @@ source repo and the exact commit the copy derived from), fetches upstream, and f
 
 It then rewrites the manifest to the new commit. Self-updating, but human-in-the-loop on conflicts — the same principle
 as the done-gate. (Requires the source to be a committed git repo so the merge base exists.)
+
+## The guard layer
+
+Three hooks, wired by `/adopt-goodbehavior` (independently — take any subset):
+
+- **`guard-bash.js`** (`PreToolUse`/`Bash`) — a small set of hard shapes (sudo/doas, download-piped-to-shell,
+  reverse shell, recursive delete of root, home, or system paths) are denied outright, in every lane, no exceptions.
+  Past that, a **zone ladder** looks at what the command actually touches: silent inside the project; anything
+  reaching outside it (home, a sibling project, a system path) is **gray** — the guarded lane asks, the fast
+  lane allows it and writes an audit line either way.
+- **`guard-injection.js`** (`UserPromptSubmit` + `PostToolUse` on `Read`/`WebFetch`) — content matching a named
+  prompt-injection shape gets flagged back to the model as data to distrust, never blocked. Your prompt is never
+  dropped; a fetched or read file's embedded instructions are never followed silently.
+- **Every decision, one audit trail** — `.claude/goodbehavior/audit/YYYY-MM-DD.jsonl`, one line per event, named
+  shape only (never the raw matched content). `/report-goodbehavior` turns it into a plain-language digest.
+
+**Guarded vs fast lane.** `/adopt-goodbehavior` asks: *guarded* keeps Claude Code's own permission prompts on,
+the guard as an extra net; *fast* runs on `bypassPermissions` — the guard is the *only* net. Say that plainly to
+yourself before picking fast: **it's a blocklist, not a sandbox.** A command that matches no named shape and
+touches no zone outside the project runs, in either lane — enforced means "the hooks can't be turned off,"
+never "nothing risky can get through." For a machine-wide, owner-locked deployment an individual project or
+session can't shed, see `templates/OWNER-SETUP.md`.
 
 ## The honest caveat
 

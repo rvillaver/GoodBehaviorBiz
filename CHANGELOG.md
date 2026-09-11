@@ -3,6 +3,31 @@
 Every entry here is a unit a downstream project will 3-way-merge via `/update-goodbehavior` — write entries so an
 adopter skimming before an update knows what's coming and why.
 
+## 2026-09-11 — Guard layer: hard shapes, zones, injection flagging, unified audit, owner lock
+
+Claude-native, no BlitzPi dependency — BlitzPi's checkpoint architecture (threat-detection, zones, permissions) was
+design reference only; every shape/zone here is re-derived clean in plain Node.
+
+- **`guard-bash.js`** (`PreToolUse`/`Bash`) — hard shapes denied outright in every lane: sudo/doas,
+  download-piped-to-shell, reverse shell, recursive delete of root, home, or system. Past that, a zone ladder
+  (project / project-adjacent / home / system) decides per command target: silent in-project; guarded lane asks
+  anything outside it, fast lane allows-and-audits. Fails closed (malformed input, internal error → deny).
+- **`guard-injection.js`** (`UserPromptSubmit` + `PostToolUse` on `Read`/`WebFetch`) — ten named prompt-injection
+  shapes flagged back to the model, never blocked: a user's prompt is never dropped, fetched/read content is
+  flagged as data to distrust. Fails open (nothing to fail closed into on a warn-only hook). Self-exempt from its
+  own source/test files.
+- **Unified audit** — every guard decision (deny/ask/allow/annotated) lands in
+  `.claude/goodbehavior/audit/YYYY-MM-DD.jsonl`, one line, named shape only — raw matched content is never
+  logged. `/report-goodbehavior` + `scripts/report.js` turn it into an owner-readable digest.
+- **`/adopt-goodbehavior`** now asks hooks (each independent) and, if `guard-bash` is taken, a guarded-vs-fast
+  lane — stating the blocklist-not-sandbox tradeoff plainly and recording the choice as a project convention
+  (bypass mode can't be enabled from settings.json alone; it's always a session launch choice).
+- **`scripts/install.js`** — `plan.hook` boolean → `plan.hooks` list; a hook can now wire under multiple
+  settings.json events from one file (`guard-injection`'s two wirings share one script).
+- **`templates/managed-settings.json` + `templates/OWNER-SETUP.md`** — a machine-wide, owner-enforced deployment
+  path (`allowManagedHooksOnly` + `disableBypassPermissionsMode`) an individual project or session can't shed.
+  Separate from `/adopt-goodbehavior`; admin-driven, one-page setup.
+
 ## 2026-08-28 — GoodBehaviorBiz: Claude-native fork, toolchain ported to plain Node
 
 Created as a full-copy evolution of the Claude-native GoodBehavior, set up to route every command surface through

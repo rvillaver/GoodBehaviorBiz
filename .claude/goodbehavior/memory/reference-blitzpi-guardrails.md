@@ -21,5 +21,16 @@ does NOT cover non-LLM command surfaces; and it has two fail-OPEN paths (`config
 init throws → no hook registered → ungoverned).** GoodBehaviorBiz must instead build a mandatory chokepoint every
 surface crosses, fail **closed**, with "governance off" itself an audited decision.
 
+**✔ Verified (2026-09-11, correcting this memory's earlier omission) — `threat-detection.ts`'s `THREAT_PATTERNS` /
+`INJECTION_SHAPES` are hardcoded regex arrays in-process, same technique GoodBehaviorBiz's `guard-bash.js` ported. But
+BlitzPi ALSO has a separate, opt-in external-feed layer at `src/feeds/` that this memory previously missed entirely:
+`FEEDS` in `feeds/store.ts` — gitleaks (secrets, from a GitHub-hosted `gitleaks.toml`), Sigma (command shapes, from a
+SigmaHQ GitHub release zip), URLhaus (malicious URLs, abuse.ch) — fetched only on `blitzpi feeds opt-in` +
+`feeds update`, hashed, compiled to a common rule shape, atomically swapped with rollback; default mode `monitor` not
+`enforce`. Plus `feeds/osv.ts`: a live per-install-command POST to `api.osv.dev` (not a bulk download) checking
+known-malicious packages, 24h-cached. **This is a distinct, heavier layer from the hardcoded shapes** — GBBiz's
+Phase 1–2 only ports the hardcoded-shapes layer; the feeds layer maps onto `PRODUCTION-BACKLOG.md`'s already-deferred
+"Threat-feed rules" item, not anything currently planned.
+
 Checkpoint order (first block stops the rest): threat-detection → access-profile → governance (LLM) → sandbox (file) →
 execute. Map this onto GoodBehaviorBiz's command surfaces ([[project-gbbiz]]).

@@ -23,12 +23,14 @@ const INVARIANT_FILES = [
   ".claude/skills/audit-goodbehavior/SKILL.md",
   ".claude/skills/roadmap-goodbehavior/SKILL.md",
   ".claude/hooks/done-gate.js",
+  ".claude/hooks/guard-bash.js",
+  ".claude/hooks/guard-injection.js",
   "templates/MEMORY.md",
   "templates/UAT-PLAN.md",
   "templates/ROADMAP.md",
   "templates/PRODUCTION-BACKLOG.md",
 ];
-const JS_ARTIFACTS = [".claude/hooks/done-gate.js", "scripts/install.js", "scripts/update.js"];
+const JS_ARTIFACTS = [".claude/hooks/done-gate.js", ".claude/hooks/guard-bash.js", ".claude/hooks/guard-injection.js", "scripts/install.js", "scripts/update.js", "scripts/report.js"];
 
 const DEV_CODED = /(UI \+ backend|the real UI|UI \*and\* (the real )?backend|run the app\b)/i;
 const PROFILE_SCOPED = /(profile|for software|development|dev app|dev project)/i;
@@ -77,9 +79,21 @@ function main() {
   }
 
   // JSON artifacts parse (strip // comment lines first)
-  for (const rel of [".claude/settings.json", "templates/manifest.json"]) {
+  for (const rel of [".claude/settings.json", "templates/manifest.json", "templates/managed-settings.json"]) {
     try { JSON.parse(read(rel).replace(/^\s*\/\/.*$/gm, "")); check(`${rel} parses as JSON`, true); }
     catch (e) { check(`${rel} parses as JSON`, false, String(e)); }
+  }
+
+  // managed-settings.json carries the specific keys that make it actually enforced, not just a hook list
+  {
+    const m = JSON.parse(read("templates/managed-settings.json"));
+    check("managed-settings.json: allowManagedHooksOnly is true", m.allowManagedHooksOnly === true);
+    check("managed-settings.json: disableBypassPermissionsMode is set", m.permissions?.disableBypassPermissionsMode === "disable");
+    check("managed-settings.json: wires guard-bash under PreToolUse/Bash",
+      (m.hooks?.PreToolUse || []).some((e) => e.matcher === "Bash" && (e.hooks || []).some((h) => (h.command || "").includes("guard-bash"))));
+    check("managed-settings.json: wires guard-injection under UserPromptSubmit and PostToolUse",
+      (m.hooks?.UserPromptSubmit || []).some((e) => (e.hooks || []).some((h) => (h.command || "").includes("guard-injection"))) &&
+      (m.hooks?.PostToolUse || []).some((e) => e.matcher === "Read|WebFetch" && (e.hooks || []).some((h) => (h.command || "").includes("guard-injection"))));
   }
 
   // JS artifacts parse

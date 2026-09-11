@@ -52,7 +52,7 @@ function main() {
 
     const templates = {};
     for (const n of "abcd") templates[`docs/${n}.md`] = `templates/${n}.md`;
-    const plan = { source, target, skills: [], profiles: [], hook: false, templates };
+    const plan = { source, target, skills: [], profiles: [], hooks: [], templates };
     const planPath = path.join(tmp, "plan.json");
     fs.writeFileSync(planPath, JSON.stringify(plan));
     const ri = spawnSync("node", [INSTALL, "--plan", planPath], { encoding: "utf8" });

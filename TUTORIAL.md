@@ -16,8 +16,9 @@ crosses the line and what never does:
 |---|---|
 | `.claude/skills/*-goodbehavior/` — the working skills (adopt itself stays behind: it's a run-once installer) | This `TUTORIAL.md`, the `README.md`, `scripts/`, `tests/` |
 | `.claude/hooks/done-gate.js` + its `settings.json` wiring | GoodBehavior's own `TODO.md` (its dev backlog) |
-| The **principles** merged into *your* `CLAUDE.md` (or linked from your existing doc) | GoodBehavior's self-dev `docs/` (gitignored anyway) |
-| Plan/memory **scaffolding** from `templates/` — which become *your* `ROADMAP.md`, `MEMORY.md`, etc. | The GoodBehavior git history / source repo |
+| `.claude/hooks/guard-bash.js` + `.claude/hooks/guard-injection.js` (independent choices — take any subset) + their `settings.json` wiring | GoodBehavior's self-dev `docs/` (gitignored anyway) |
+| The **principles** merged into *your* `CLAUDE.md` (or linked from your existing doc) | The GoodBehavior git history / source repo |
+| Plan/memory **scaffolding** from `templates/` — which become *your* `ROADMAP.md`, `MEMORY.md`, etc. | `templates/managed-settings.json` + `OWNER-SETUP.md` — a separate, admin-driven, machine-wide setup; not part of a normal adopt |
 | A `manifest.json` recording where the copy came from (so updates can 3-way-merge) | |
 
 So the only trace of "GoodBehavior" in your repo is the skill **filenames** (`*-goodbehavior`) and the manifest pointer.
@@ -76,6 +77,13 @@ analysis/research/creative project this is skipped, and getting the **profile sl
 
 If deploy is push-triggered, adopt flags that **pushing = deploying** (needs your explicit go-ahead). Your answers get
 recorded so later steps use the agreed method, not a guess.
+
+**Also confirmed: hooks and, if you take the bash guard, a lane.** `done-gate` (pushes back on self-declared
+"done"), `guard-bash` (blocks a few hard-dangerous command shapes; asks or logs anything else reaching outside
+the project), and `guard-injection` (flags, never blocks, content matching a named prompt-injection shape) are
+each independent yes/no choices. If you take `guard-bash`, adopt also asks **guarded** (Claude Code's own
+prompts stay on, the guard is an extra net) vs **fast** (`bypassPermissions` — the guard is the *only* net,
+which it states plainly is a blocklist, not a sandbox, at ask time). Neither choice is silently assumed.
 
 > After adopt, **open a new session in your project** for everything below.
 

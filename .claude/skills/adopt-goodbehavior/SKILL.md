@@ -84,8 +84,17 @@ real decisions; recommend a default for each, and make clear nothing is written 
   against** — the **deployed URL** or localhost. Show what you found per facet + a recommendation; let the user correct
   any of them. If deploy is push-triggered, flag that **pushing = deploying** (so it needs explicit go-ahead), and if the
   verify target is a deployed URL, capture that URL (ask if it isn't in the repo).
-- **Done-gate hook** — install it (project-local) vs off. (Skills and hook are **always project-local copies** — never a
-  symlink, never a global `~/.claude/` install — so this is a yes/no, not a scope choice.)
+- **Hooks** — install done-gate (Stop), guard-bash (PreToolUse/Bash hard-shape block), and guard-injection
+  (UserPromptSubmit + PostToolUse/Read|WebFetch — warns on named injection shapes, never blocks) vs off,
+  independently. (Skills
+  and hooks are **always project-local copies** — never a symlink, never a global `~/.claude/` install.)
+- **Lane — only ask when `guard-bash` is being installed.** *Guarded* (default: Claude Code's own permission prompts
+  stay on; recommend this) vs *fast* (the project is meant to be run with `--dangerously-skip-permissions`, so
+  `guard-bash` is the only net). State the tradeoff plainly at ask time: **bypass mode skips every permission
+  prompt — the guard is a blocklist of hard shapes, not default-deny; fast trades that safety net for speed, a
+  seatbelt, not a vault.** Also be upfront about the mechanism: Claude Code refuses to enable bypass purely from
+  `settings.json` — it only activates when a session is *launched* with `--dangerously-skip-permissions`, so *fast*
+  is a **recorded convention** ("launch sessions this way"), not a switch the installer can force on.
 - **Planning** — create `docs/plans/ROADMAP.md` + `PRODUCTION-BACKLOG.md`, or **map onto** an existing roadmap / handoff
   "next steps" / issue tracker.
 - **Memory** — project memory dir vs `docs/learnings/`; integrate an existing learnings/notes doc if present.
@@ -103,9 +112,10 @@ manifest); you do only the **judgment steps** the script can't.
    {
      "source": "<abs source path>", "target": "<abs target path>",
      "skills":   ["audit-goodbehavior", "roadmap-goodbehavior", "gate-build-goodbehavior",
-                  "verify-goodbehavior", "uatplan-goodbehavior", "learn-goodbehavior", "update-goodbehavior"],
+                  "verify-goodbehavior", "uatplan-goodbehavior", "learn-goodbehavior", "update-goodbehavior",
+                  "report-goodbehavior"],
      "profiles": ["<only the matched profile(s) — never all four>"],
-     "hook": true,
+     "hooks": ["done-gate", "guard-bash", "guard-injection-prompt", "guard-injection-content"],
      "templates": { "docs/plans/ROADMAP.md": "templates/ROADMAP.md", "...": "per the confirmed planning/memory choices" }
    }
    ```
@@ -126,7 +136,15 @@ manifest); you do only the **judgment steps** the script can't.
    profile body into `<target>/.claude/goodbehavior/profiles/custom.md` (no core file to copy).
 4. **Confirmed dev approach** (judgment; *only if a development slot is in play*): record in the target's CLAUDE.md
    `## Stack & conventions` + a `project` memory, so verify/gate-build use the agreed run/deploy/verify method.
-5. **Seed memories** (judgment): `definition-of-done` (one line + pointer to the principles home — don't restate) +
+5. **Confirmed lane** (judgment; *only if `guard-bash` was installed*): record the choice in the target's CLAUDE.md
+   `## Stack & conventions` (same home as step 4) so it's never silently re-assumed later. For *fast*, the note must
+   name the launch convention plainly, e.g.: *"This project runs in the fast lane — launch sessions with
+   `claude --dangerously-skip-permissions`; `guard-bash` is the only net (blocklist, not default-deny)."* Optionally
+   also set `"permissions": {"defaultMode": "bypassPermissions"}` in the target's `settings.json` so a session already
+   launched with `--allow-dangerously-skip-permissions` defaults into bypass without retyping the mode — but the CLAUDE.md
+   note is what actually carries the convention, since the setting alone does not enable bypass. For *guarded*, no
+   note is needed — Claude Code's own prompts are already the default; just confirm nothing else was written.
+6. **Seed memories** (judgment): `definition-of-done` (one line + pointer to the principles home — don't restate) +
    `reporting-honesty` + the `project-profile` from step 3; start an empty `build-deploy-gotchas`.
 
 ## Report
