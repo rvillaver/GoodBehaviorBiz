@@ -65,8 +65,9 @@ function main() {
       out.totals.by_tool[tool] = (out.totals.by_tool[tool] || 0) + 1;
       if (entry.shape) out.totals.by_shape[entry.shape] = (out.totals.by_shape[entry.shape] || 0) + 1;
       // "notable" = anything that wasn't a plain silent in-project allow: a deny, an ask, a fast-lane
-      // gray-zone allow (has a zone other than "project"), or any injection annotation.
-      const notable = decision === "deny" || decision === "ask" || decision === "annotated" ||
+      // gray-zone allow (has a zone other than "project"), an injection annotation, or a threat-feed hit
+      // (decision:"monitor", Phase 6) — a feed match is exactly the kind of thing this report exists to surface.
+      const notable = decision === "deny" || decision === "ask" || decision === "annotated" || decision === "monitor" ||
         (decision === "allow" && entry.zone && entry.zone !== "project");
       if (notable) out.notable.push(entry);
     }

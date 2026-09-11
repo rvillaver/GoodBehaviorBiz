@@ -113,7 +113,7 @@ manifest); you do only the **judgment steps** the script can't.
      "source": "<abs source path>", "target": "<abs target path>",
      "skills":   ["audit-goodbehavior", "roadmap-goodbehavior", "gate-build-goodbehavior",
                   "verify-goodbehavior", "uatplan-goodbehavior", "learn-goodbehavior", "update-goodbehavior",
-                  "report-goodbehavior"],
+                  "report-goodbehavior", "feeds-goodbehavior"],
      "profiles": ["<only the matched profile(s) — never all four>"],
      "hooks": ["done-gate", "guard-bash", "guard-injection-prompt", "guard-injection-content"],
      "templates": { "docs/plans/ROADMAP.md": "templates/ROADMAP.md", "...": "per the confirmed planning/memory choices" }

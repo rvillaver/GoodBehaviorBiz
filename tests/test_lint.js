@@ -30,7 +30,12 @@ const INVARIANT_FILES = [
   "templates/ROADMAP.md",
   "templates/PRODUCTION-BACKLOG.md",
 ];
-const JS_ARTIFACTS = [".claude/hooks/done-gate.js", ".claude/hooks/guard-bash.js", ".claude/hooks/guard-injection.js", "scripts/install.js", "scripts/update.js", "scripts/report.js"];
+const JS_ARTIFACTS = [
+  ".claude/hooks/done-gate.js", ".claude/hooks/guard-bash.js", ".claude/hooks/guard-injection.js",
+  "scripts/install.js", "scripts/update.js", "scripts/report.js", "scripts/feeds.js",
+  "scripts/feeds/store.js", "scripts/feeds/toml.js", "scripts/feeds/yaml.js", "scripts/feeds/zip.js", "scripts/feeds/evaluate.js",
+  "scripts/feeds/adapters/gitleaks.js", "scripts/feeds/adapters/sigma.js", "scripts/feeds/adapters/urlhaus.js",
+];
 
 const DEV_CODED = /(UI \+ backend|the real UI|UI \*and\* (the real )?backend|run the app\b)/i;
 const PROFILE_SCOPED = /(profile|for software|development|dev app|dev project)/i;

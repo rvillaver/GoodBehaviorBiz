@@ -115,3 +115,50 @@ settings.json as a same-session-only convenience, never the actual switch.
   found was in a child-process/remote-settings context, not clearly the current session's own managed-file
   lookup (`dv_()` reads a hardcoded platform switch) — not confirmed to safely redirect a local test away from
   the real system path, so it wasn't relied on. Worth re-checking if a future session wants a sudo-free live test.
+
+**Confirmed (2026-09-11) — Phase 6, threat feeds (`scripts/feeds/`), re-derived zero-dependency TOML/YAML
+parsers + a Sigma condition compiler, built and verified against real live feeds, not synthetic fixtures:**
+- **Real corpus checked, not assumed**: fetched the actual live gitleaks.toml (97KB/222 rules), the actual live
+  SigmaHQ release zip (3.1MB/137 real linux/macos process_creation rules), and the actual live URLhaus list
+  (1.1MB/~14K URLs) — 221/222 gitleaks rules and 121/137 Sigma rules compile (the rest skip for legitimate,
+  named reasons: a couple of RE2-only regex features, rules needing process context this guard can't see).
+- **Grammar scope corrections found only by testing against the LARGER real corpus, not the first small
+  sample**: gitleaks needs `'''triple-quoted'''` literal strings and `[[table.path]]` dotted array-of-tables
+  nesting (not just simple key=value); Sigma needs YAML block-scalar (`description: |`) consumption — present
+  in the 137-rule sample, absent from the first 5 rules checked by hand. **Why this matters**: a "check a few
+  real examples" pass can still miss real grammar features that only show up at scale — the fix each time was
+  to widen the sample, not to special-case around the first failure.
+- **`Image` fields need a synthetic leading `/`** before matching Sigma's `endswith('/x')` patterns — real
+  Sigma rules assume a full process path (`/usr/bin/nc`), but a bash command is usually typed bare (`nc`).
+  Without normalizing to `/nc`, `endswith('/nc')` never matches ordinary shell usage — confirmed by a rule
+  silently never firing until this was added. Lives in `scripts/feeds/evaluate.js`'s header comment as the
+  reason, so it isn't "optimized away" by someone who doesn't know why it's there.
+- **A permissive-by-design parser needs its own sanity floor.** `compileGitleaks` doesn't throw on unrecognized
+  TOML syntax (best-effort skip), so pointing the feed source at the WRONG document doesn't reliably fail —
+  confirmed live: gitleaks' own README.md contains example `[[rules]]` blocks as documentation, and the parser
+  happily "compiled" one as if it were the real feed. Fixed with `MIN_PLAUSIBLE_RULES = 20` (a real feed has
+  200+; anything drastically smaller is almost certainly the wrong source).
+- **A real, load-bearing bug caught only by wiring into the real hook, not by the adapter's own test suite**:
+  guard-bash.js's inlined secrets-matcher passed a gitleaks-shaped `{regex, flags}` rule object straight into a
+  helper expecting the Sigma-pattern shape `{source, flags}`. `pattern.source` came back `undefined`, and
+  `new RegExp(undefined, flags)` matches **every string** — every command would have "matched" every secret
+  rule. `scripts/feeds/evaluate.js` (used by tests) was never affected — the bug was only in guard-bash.js's own
+  duplicate of the matching logic (deliberately duplicated, not required, so hooks stay deployment-independent
+  — see the next entry). **Why this matters**: field-shape mismatches between differently-adapter-produced rule
+  objects are exactly the kind of bug that only shows up when two pieces of code that were written far apart in
+  time get wired together live — a regression test now lives in `tests/test_guard.js`'s feeds section asserting
+  a benign command matches nothing.
+- **Hooks deliberately do NOT `require()` `scripts/feeds/` — the matching logic is copy-duplicated inline** in
+  both `guard-bash.js` and `guard-injection.js`. Reason: `templates/OWNER-SETUP.md`'s machine-wide deployment
+  copies only the hook *files* to a bare location (e.g. `/usr/local/share/goodbehavior/hooks/`) — a relative
+  `require("../feeds/evaluate")` would break there, since the surrounding `scripts/feeds/` tree isn't copied
+  alongside. `scripts/feeds/evaluate.js` still exists and is used by the test suite; the hooks just don't
+  depend on it at runtime. If the matching logic changes, it must change in three places (evaluate.js +
+  guard-bash.js's copy + guard-injection.js's copy) — flagged here so a future edit doesn't update one and miss
+  the others.
+- **`compileUrlhaus` must return zero `rules` (not one rule wrapping an empty set) when there are no URLs** —
+  otherwise the store's generic "compiled to zero rules → refuse the update" safety net never triggers for this
+  feed specifically, since `rules.length` would always be 1 regardless of how many URLs are actually inside it.
+  Caught by a deterministic `FeedStore` unit test (mocked `fetch`, not live network) built specifically to
+  verify rotation/rollback/compile-failure-keeps-previous — the live network tests wouldn't have caught this
+  (real URLhaus is never empty).

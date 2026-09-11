@@ -13,11 +13,11 @@ The parsing/counting is deterministic — run it, don't re-derive it:
 node <source>/scripts/report.js --target <project>   # add --since YYYY-MM-DD --until YYYY-MM-DD to scope a period
 ```
 It reads every `<target>/.claude/goodbehavior/audit/YYYY-MM-DD.jsonl`, and returns one JSON summary: total event
-count; counts by decision (`deny`/`ask`/`allow`/`annotated`), by tool, and by named shape; and the full list of
-**notable** entries — everything except a plain silent in-project allow (so: every deny, every ask, every
-injection annotation, and every fast-lane gray-zone allow). If there's no audit directory at all, it says so in
-`warnings` rather than erroring — that's a legitimate state (the guard isn't wired here, or nothing has happened
-yet), not a failure.
+count; counts by decision (`deny`/`ask`/`allow`/`annotated`/`monitor`), by tool, and by named shape; and the full
+list of **notable** entries — everything except a plain silent in-project allow (so: every deny, every ask,
+every injection annotation, every fast-lane gray-zone allow, and every threat-feed hit). If there's no audit
+directory at all, it says so in `warnings` rather than erroring — that's a legitimate state (the guard isn't
+wired here, or nothing has happened yet), not a failure.
 
 ## Turn it into the digest (judgment half)
 
@@ -32,6 +32,10 @@ Write a short, plain-language summary a non-technical owner can read in under a 
   commands tried to touch files outside the project and were held for confirmation."
 - **What got flagged, not blocked** (`annotated`, the injection layer, and fast-lane gray-zone `allow`s) — make
   the distinction clear: these ran, the guard only left a note. Don't let a reader conflate this with `deny`.
+- **What the threat feeds caught** (`monitor`, shape named `feed:<feed>:<rule-id>`) — opt-in, monitor-only by
+  design (see `/feeds-goodbehavior`): these ran too, same as `annotated`. Translate the feed name
+  (`commands`→"a known-risky command shape", `secrets`→"a credential-shaped pattern", `urls`→"a URL listed as
+  distributing malware") — don't just print the raw rule id.
 - **If `notable` is empty** — say so plainly ("nothing notable this period — N events, all normal in-project
   activity"). An empty report is a legitimate, good result, not something to pad out or apologize for.
 

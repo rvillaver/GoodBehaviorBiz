@@ -49,14 +49,15 @@ function main() {
       { timestamp: "2026-09-11T09:01:00Z", tool: "UserPromptSubmit", shape: "ignore-instructions", decision: "annotated", session_id: "s2" },
       { timestamp: "2026-09-11T09:02:00Z", tool: "PostToolUse:Read", shape: "exfiltrate", decision: "annotated", session_id: "s2" },
       { timestamp: "2026-09-11T09:03:00Z", tool: "Bash", shape: null, decision: "allow", zone: "project", session_id: "s2" },
+      { timestamp: "2026-09-11T09:04:00Z", tool: "Bash", shape: "feed:commands:80915f59-9b56-4616-9de0-fd0dea6c12fe", decision: "monitor", session_id: "s2" },
     ]);
 
     const out = runReport(target);
-    check("totals: all 7 events counted", out.totals.events === 7);
+    check("totals: all 8 events counted", out.totals.events === 8);
     check("totals by_decision correct",
       out.totals.by_decision.deny === 1 && out.totals.by_decision.allow === 3 &&
-      out.totals.by_decision.ask === 1 && out.totals.by_decision.annotated === 2);
-    check("totals by_tool correct", out.totals.by_tool.Bash === 5 && out.totals.by_tool.UserPromptSubmit === 1 && out.totals.by_tool["PostToolUse:Read"] === 1);
+      out.totals.by_decision.ask === 1 && out.totals.by_decision.annotated === 2 && out.totals.by_decision.monitor === 1);
+    check("totals by_tool correct", out.totals.by_tool.Bash === 6 && out.totals.by_tool.UserPromptSubmit === 1 && out.totals.by_tool["PostToolUse:Read"] === 1);
     check("totals by_shape correct", out.totals.by_shape["sudo-doas"] === 1 && out.totals.by_shape["ignore-instructions"] === 1 && out.totals.by_shape.exfiltrate === 1);
 
     check("notable excludes the two plain project-zone allows",
@@ -66,14 +67,16 @@ function main() {
     check("notable includes both annotated entries", out.notable.filter((e) => e.decision === "annotated").length === 2);
     check("notable includes the fast-lane gray-zone allow (zone home, decision allow)",
       out.notable.some((e) => e.decision === "allow" && e.zone === "home"));
-    check("notable count is exactly 5 (7 total minus 2 plain allows)", out.notable.length === 5);
+    check("notable includes the threat-feed monitor hit (found live: this was missing before the fix)",
+      out.notable.some((e) => e.decision === "monitor" && e.shape && e.shape.startsWith("feed:")));
+    check("notable count is exactly 6 (8 total minus 2 plain allows)", out.notable.length === 6);
     check("notable sorted chronologically", out.notable.every((e, i) => i === 0 || String(out.notable[i - 1].timestamp) <= String(e.timestamp)));
 
     // date scoping
     {
       const scoped = runReport(target, ["--since", "2026-09-11", "--until", "2026-09-11"]);
       check("--since/--until scopes to one file", scoped.period.files.length === 1 && scoped.period.files[0] === "2026-09-11.jsonl");
-      check("--since/--until scopes totals accordingly", scoped.totals.events === 4);
+      check("--since/--until scopes totals accordingly", scoped.totals.events === 5);
     }
 
     // malformed line in a file is skipped with a warning, not a crash
@@ -81,7 +84,7 @@ function main() {
       const dir = path.join(target, ".claude", "goodbehavior", "audit");
       fs.appendFileSync(path.join(dir, "2026-09-10.jsonl"), "not valid json\n");
       const out2 = runReport(target);
-      check("malformed line skipped, not crashed", out2.totals.events === 7 && out2.warnings.some((w) => w.includes("unparseable")));
+      check("malformed line skipped, not crashed", out2.totals.events === 8 && out2.warnings.some((w) => w.includes("unparseable")));
     }
   } finally {
     fs.rmSync(target, { recursive: true, force: true });

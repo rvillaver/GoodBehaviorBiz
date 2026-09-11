@@ -407,6 +407,104 @@ function readLane(cwd) {
   return "guarded";
 }
 
+// ---- threat feeds (Phase 6): opt-in, monitor-mode only — never affects the deny/ask/allow decision above,
+// only adds an extra audited line when a command matches a compiled feed rule. Reads pre-compiled rules.json
+// only (no TOML/YAML/zip parsing at hook-invocation time — that only happens in `feeds update`). The matching
+// logic here is intentionally a self-contained copy of scripts/feeds/evaluate.js, not a require() of it: this
+// file must keep working when copied standalone to a machine-wide location (templates/OWNER-SETUP.md), where
+// the surrounding scripts/feeds/ tree isn't present. Both copies are tested against the same real fixtures. ----
+
+function feedsDir() { return process.env.GOODBEHAVIOR_FEEDS_DIR || path.join(HOME, ".goodbehavior", "feeds"); }
+function feedOptedIn() { try { return fs.existsSync(path.join(feedsDir(), "opt-in")); } catch (e) { return false; } }
+function readFeedRules(name) {
+  try {
+    const p = path.join(feedsDir(), name, "rules.json");
+    const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+    return Array.isArray(parsed.rules) ? parsed.rules : [];
+  } catch (e) { return []; } // not fetched yet, or unreadable — no matches, never an error
+}
+
+function feedMatchesPattern(text, pattern) {
+  try { return new RegExp(pattern.source, pattern.flags).test(text); } catch (e) { return false; }
+}
+function feedMatcherMatches(matcher, fields) {
+  const raw = fields[matcher.field];
+  const values = Array.isArray(raw) ? raw : raw !== undefined && raw !== null ? [raw] : [];
+  if (!values.length) return false;
+  const oneMatches = (v) => matcher.all
+    ? matcher.patterns.every((p) => feedMatchesPattern(v, p))
+    : matcher.patterns.some((p) => feedMatchesPattern(v, p));
+  return values.some(oneMatches);
+}
+function feedSelectionMatches(matchers, fields) { return matchers.every((m) => feedMatcherMatches(m, fields)); }
+function feedNamesFor(glob, allNames) {
+  const re = new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`, "i");
+  return allNames.filter((n) => re.test(n));
+}
+function feedEvalCondition(cond, selections, fields) {
+  switch (cond.t) {
+    case "sel": { const m = selections[cond.name]; return Boolean(m) && feedSelectionMatches(m, fields); }
+    case "of": {
+      const names = feedNamesFor(cond.glob, Object.keys(selections));
+      const hit = names.filter((n) => selections[n] && feedSelectionMatches(selections[n], fields));
+      return cond.count === 1 ? hit.length > 0 : names.length > 0 && hit.length === names.length;
+    }
+    case "not": return !feedEvalCondition(cond.a, selections, fields);
+    case "and": return feedEvalCondition(cond.a, selections, fields) && feedEvalCondition(cond.b, selections, fields);
+    case "or": return feedEvalCondition(cond.a, selections, fields) || feedEvalCondition(cond.b, selections, fields);
+    default: return false;
+  }
+}
+
+/** All programs this (possibly compound) command invokes, across every statement — reuses the same
+ *  splitter/parser as the hard-shape/zone checks above. Used as Sigma's "Image" field. */
+function invokedPrograms(command) {
+  const names = new Set();
+  for (const { text } of splitStatements(command)) {
+    const parsed = parseCommand(splitWords(text).map(unquote));
+    if (parsed && parsed.cmd) names.add(parsed.cmd);
+  }
+  return [...names].map((n) => (n.startsWith("/") ? n : "/" + n)); // see evaluate.js header: endswith('/x') needs a leading slash even for a bare command name
+}
+
+/** URL-looking substrings in the (unquoted, per maskQuoted) parts of the command — same URL_RE already used
+ *  to strip URLs before path-target extraction, reused here to find them instead. */
+function commandUrls(command) {
+  const masked = maskQuoted(command);
+  const urls = [];
+  let m;
+  const re = new RegExp(URL_RE.source, "gi");
+  while ((m = re.exec(masked))) urls.push(command.slice(m.index, m.index + m[0].length));
+  return urls;
+}
+
+/** Returns [{feed, id}] for every compiled feed rule this command matches. Silent no-op (empty array, no
+ *  file reads beyond the opt-in check) unless the owner/adopter has opted in via `node scripts/feeds.js opt-in`. */
+function checkFeeds(command) {
+  if (!feedOptedIn()) return [];
+  const hits = [];
+  const fields = { CommandLine: command, Image: invokedPrograms(command) };
+  for (const rule of readFeedRules("commands")) {
+    if (rule.sigma && feedEvalCondition(rule.sigma.condition, rule.sigma.selections, fields)) hits.push({ feed: "commands", id: rule.id });
+  }
+  for (const rule of readFeedRules("secrets")) {
+    // gitleaks-compiled rules use {regex, flags}; feedMatchesPattern expects {source, flags} (the Sigma pattern
+    // shape) — without this translation, pattern.source is undefined and new RegExp(undefined) matches
+    // EVERY string. Caught live: a stale test feed made this visible as a hit on "git status".
+    if (rule.regex !== undefined && feedMatchesPattern(command, { source: rule.regex, flags: rule.flags })) {
+      hits.push({ feed: "secrets", id: rule.id });
+    }
+  }
+  const urls = commandUrls(command);
+  if (urls.length) {
+    for (const rule of readFeedRules("urls")) {
+      const set = rule.set && rule.set.urls;
+      if (Array.isArray(set) && urls.some((u) => set.includes(u))) hits.push({ feed: "urls", id: rule.id });
+    }
+  }
+  return hits;
+}
+
 // ---- audit ----
 
 function auditPath(cwd) {
@@ -470,6 +568,15 @@ function main(input) {
       "the fast lane; the guard is a blocklist net, not a sandbox."
     );
     process.exit(0);
+  }
+
+  // Threat feeds (Phase 6, opt-in): never changes the decision below, only adds extra audited "monitor"
+  // lines when a command matches a compiled feed rule (named id only — same redaction discipline as shapes).
+  for (const hit of checkFeeds(command)) {
+    writeAudit(cwd, {
+      timestamp: new Date().toISOString(), tool: "Bash", shape: `feed:${hit.feed}:${hit.id}`,
+      decision: "monitor", session_id: sessionId,
+    });
   }
 
   // Past the hard shapes: does this command touch somewhere outside the project? (Phase 3 zone ladder.)

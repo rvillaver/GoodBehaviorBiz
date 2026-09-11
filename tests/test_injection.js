@@ -160,6 +160,54 @@ function main() {
     check("unknown event: no annotation, no audit", context === null && auditLines.length === 0);
   }
 
+  // Phase 6 — urlhaus on WebFetch (opt-in, monitor-only). A small hand-built fixture, same as test_guard.js's
+  // feed section (live-verified separately against the real feed, recorded in the phase archive).
+  {
+    const feedsDir = fs.mkdtempSync(path.join(os.tmpdir(), "guard-injection-feeds-"));
+    fs.writeFileSync(path.join(feedsDir, "opt-in"), new Date().toISOString());
+    fs.mkdirSync(path.join(feedsDir, "urls"), { recursive: true });
+    fs.writeFileSync(path.join(feedsDir, "urls", "rules.json"), JSON.stringify({
+      rules: [{ id: "fake-listed-url", category: "url", severity: "high", set: { urls: ["http://bad.example.invalid/x"] } }], skipped: [],
+    }));
+
+    {
+      const { context, auditLines } = runHook(
+        { hook_event_name: "PostToolUse", tool_name: "WebFetch", tool_input: { url: "http://bad.example.invalid/x" }, tool_response: { text: "perfectly ordinary page content" } },
+        { env: { GOODBEHAVIOR_FEEDS_DIR: feedsDir } }
+      );
+      const audited = auditLines.find((l) => l.tool === "PostToolUse:WebFetch" && l.shape === "feed:urls:fake-listed-url" && l.decision === "monitor");
+      check("urlhaus: fetching a listed URL is flagged even with clean content", Boolean(context) && Boolean(audited), JSON.stringify({ context, auditLines }));
+    }
+    {
+      const { context, auditLines } = runHook(
+        { hook_event_name: "PostToolUse", tool_name: "WebFetch", tool_input: { url: "https://example.com/benign" }, tool_response: { text: "perfectly ordinary page content" } },
+        { env: { GOODBEHAVIOR_FEEDS_DIR: feedsDir } }
+      );
+      check("urlhaus: an unlisted URL with clean content is not flagged", context === null && auditLines.length === 0);
+    }
+    {
+      const { auditLines } = runHook(
+        { hook_event_name: "PostToolUse", tool_name: "Read", tool_input: { file_path: "notes.txt" }, tool_response: { content: "http://bad.example.invalid/x mentioned in a file" } },
+        { env: { GOODBEHAVIOR_FEEDS_DIR: feedsDir } }
+      );
+      check("urlhaus: only checked for WebFetch, never for Read (a URL merely mentioned in a file isn't a fetch)",
+        !auditLines.some((l) => l.decision === "monitor"));
+    }
+    {
+      // same rules on disk, but no opt-in marker written in this dir -> must be a silent no-op.
+      const notOptedInDir = fs.mkdtempSync(path.join(os.tmpdir(), "guard-injection-feeds-notin-"));
+      fs.mkdirSync(path.join(notOptedInDir, "urls"), { recursive: true });
+      fs.writeFileSync(path.join(notOptedInDir, "urls", "rules.json"), JSON.stringify({
+        rules: [{ id: "fake-listed-url", category: "url", severity: "high", set: { urls: ["http://bad.example.invalid/x"] } }], skipped: [],
+      }));
+      const { context, auditLines } = runHook(
+        { hook_event_name: "PostToolUse", tool_name: "WebFetch", tool_input: { url: "http://bad.example.invalid/x" }, tool_response: { text: "perfectly ordinary page content" } },
+        { env: { GOODBEHAVIOR_FEEDS_DIR: notOptedInDir } }
+      );
+      check("urlhaus: rules present but no opt-in marker -> silent no-op even for a listed URL", context === null && auditLines.length === 0);
+    }
+  }
+
   // Fail-open (unlike guard-bash's fail-closed): malformed stdin and a forced internal error both produce
   // no annotation and no crash — this hook can only warn, so there is nothing to fail closed into.
   {

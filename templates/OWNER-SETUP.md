@@ -61,6 +61,14 @@ at `.claude/goodbehavior/audit/<date>.jsonl` **inside whichever project you ran 
 resolves the project root from `$CLAUDE_PROJECT_DIR`/cwd exactly as it does under a normal project install, only
 the hook *file* lives at the shared machine location.
 
+## Threat feeds — separate, per-machine, still opt-in
+
+The three external threat feeds (Sigma command shapes, gitleaks secrets, URLhaus URLs — see
+`/feeds-goodbehavior`) are **not** part of this managed deployment. `allowManagedHooksOnly` locks which *hooks*
+run; it says nothing about the feeds they optionally check. Feed opt-in is a separate, per-machine step
+(`node scripts/feeds.js opt-in`) — enforcing the guard hooks on does not silently turn feeds on too, and feed
+matches are monitor-mode only (audited, never blocking) regardless of how the hooks themselves were deployed.
+
 ## The honest caveat
 
 This locks the guard *on* — it does not turn it into a sandbox. The guard is still a **blocklist**: a small set

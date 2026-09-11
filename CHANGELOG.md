@@ -27,6 +27,13 @@ design reference only; every shape/zone here is re-derived clean in plain Node.
 - **`templates/managed-settings.json` + `templates/OWNER-SETUP.md`** — a machine-wide, owner-enforced deployment
   path (`allowManagedHooksOnly` + `disableBypassPermissionsMode`) an individual project or session can't shed.
   Separate from `/adopt-goodbehavior`; admin-driven, one-page setup.
+- **`/feeds-goodbehavior` + `scripts/feeds/`** — three opt-in, machine-wide, monitor-mode-only threat feeds
+  (SigmaHQ command shapes, gitleaks secrets, URLhaus malicious URLs), re-derived clean with zero dependencies:
+  scoped TOML/YAML parsers (built and verified against the real live feeds, not synthetic fixtures — 221/222
+  real gitleaks rules and 121/137 real linux/macos Sigma rules compile), a zero-dependency zip reader (Node's
+  own `zlib`, no library needed), and a Sigma condition/selection compiler with its own test suite against real
+  fixture rules before being trusted. Feed matches never affect the deny/ask/allow decision — audited alongside
+  it as `decision:"monitor"`, named `feed:<name>:<rule-id>` only.
 
 ## 2026-08-28 — GoodBehaviorBiz: Claude-native fork, toolchain ported to plain Node
 
