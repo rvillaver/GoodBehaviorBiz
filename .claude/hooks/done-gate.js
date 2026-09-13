@@ -17,7 +17,26 @@
  */
 "use strict";
 
-// Tools whose use means the turn did real build work (lowercased) — arms the gate.
+// Tool names arrive lowercased and differ by host: Claude Code emits Edit/Write/Bash/WebFetch, the
+// .commandcode sibling emits edit_file/write_file/shell_command/web_fetch. Everything below is keyed on
+// the snake_case form, so host names are folded onto it FIRST.
+//
+// This mapping is load-bearing, not cosmetic: while it was missing, no Claude Code tool name matched any
+// set, the activity gate at (3) exited 0 on every turn, and the hook never fired once. Tests hid it by
+// building fixtures with names production never emits — add a real-host name to the fixtures when adding
+// a tool here, or the same gap reopens silently.
+const TOOL_ALIASES = {
+  edit: "edit_file", multiedit: "edit_file", notebookedit: "edit_file", update: "edit_file",
+  write: "write_file", create: "write_file",
+  bash: "shell_command", bashoutput: "shell_command", run: "shell_command", terminal: "shell_command",
+  webfetch: "web_fetch", fetch: "web_fetch",
+};
+function canonicalTool(name) {
+  const n = String(name || "").toLowerCase();
+  return TOOL_ALIASES[n] || n;
+}
+
+// Tools whose use means the turn did real build work (canonical names) — arms the gate.
 const BUILD_TOOLS = new Set(["edit_file", "write_file", "shell_command"]);
 // Tools that MUTATE files (for the behavioral check: what was the last change?).
 const MUTATION_TOOLS = new Set(["edit_file", "write_file"]);
@@ -66,8 +85,11 @@ function main(data) {
   if (META.test(t)) process.exit(0);
   // (2) Assertive only: the claim must head a short clause, not lurk in a long sentence.
   if (!assertiveClaim(text)) process.exit(0);
-  // (0a) An honest hedge always passes — never punish the downgrade.
-  if (HEDGE.test(t)) process.exit(0);
+  // (0a) An honest hedge passes — never punish the downgrade — but SCOPED to the clause carrying the
+  // claim. A whole-message test let "verified: X works. Everything else is pending your answer." through:
+  // the hedge about one item exempted an unbacked proof-claim about another. Under standing-proceed, where
+  // one turn closes several items, that is the common shape, not an edge case.
+  if (HEDGE.test(t) && !unhedgedProofClause(text)) process.exit(0);
   // (0b) Verification vocabulary passes only when the behavior backs it.
   if (PROOF.test(t)) {
     if (docOnlyMutations(tools) || observedAfterLastMutation(tools)) process.exit(0);
@@ -85,6 +107,17 @@ function assertiveClaim(text) {
     if (!s) continue;
     if (s.split(/\s+/).length > 12) continue; // incidental mention inside a longer sentence
     if (CLAIM.test(s.toLowerCase())) return true;
+  }
+  return false;
+}
+
+/** True if some clause makes a proof claim WITHOUT hedging it. Splits on the same boundaries as
+ *  assertiveClaim so the two agree on what a clause is. */
+function unhedgedProofClause(text) {
+  for (const raw of text.split(/[.!?\n]+/)) {
+    const s = raw.trim().toLowerCase();
+    if (!s || !PROOF.test(s)) continue;
+    if (!HEDGE.test(s)) return true;
   }
   return false;
 }
@@ -143,7 +176,7 @@ function turnToolUses(entries) {
     const content = (e.message || e).content || "";
     if (Array.isArray(content)) {
       for (const b of content) {
-        if (b && b.type === "tool_use") out.push([(b.name || "").toLowerCase(), b.input || {}]);
+        if (b && b.type === "tool_use") out.push([canonicalTool(b.name), b.input || {}]);
       }
     }
   }

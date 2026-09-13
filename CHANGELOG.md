@@ -3,6 +3,25 @@
 Every entry here is a unit a downstream project will 3-way-merge via `/update-goodbehavior` — write entries so an
 adopter skimming before an update knows what's coming and why.
 
+## 2026-09-13 — done-gate fires again: host tool names, and a scoped hedge
+
+**The done-gate had never fired under Claude Code.** Its tool sets were keyed on the sibling host's
+snake_case names (`edit_file`, `shell_command`, `web_fetch`); Claude Code emits `Edit`, `Bash`, `WebFetch`.
+Nothing matched, the activity gate exited 0 on every turn, and the bundle's headline enforcement mechanism
+was inert while advertised as live.
+
+**The tests hid it.** `tests/test_hook.js` built its fixtures with the snake_case names, so 14 cases passed
+green against a hook that could not fire in production — a passing test standing in for the real thing,
+which is the exact failure this method exists to stop.
+
+- **`canonicalTool()` folds host names onto one canonical set.** Claude Code and the snake_case sibling both
+  work; adding a tool means adding its alias, and the fixtures now use names a real host emits.
+- **The hedge exemption is scoped to the clause carrying the claim.** It was whole-message, so a hedge about
+  one item exempted an unbacked proof-claim about another: *"verified: X works. Everything else is pending
+  your answer."* passed while nothing had run since the edit. Under standing-proceed, where one turn closes
+  several items, that is the ordinary shape of a final message.
+- 19 hook tests, up from 14: hedge scoping in both directions, and the sibling host kept under test.
+
 ## 2026-09-13 — update.js resolves NEW from the tracked upstream; the ancestor pointer is gone
 
 **Bug: `update.js` reported "already up to date" while the source's remote carried unmerged work.** It resolved
@@ -18,10 +37,10 @@ wrong answer — the worst kind, since the caller stops looking.
 - Regression test drives a real local bare remote: source pushed ahead, checkout reset behind, and the update
   must not say "already up to date".
 
-**GoodBehaviorBiz has no upstream.** `.claude/goodbehavior/manifest.json` is removed. It recorded
-`/Users/rv/work/GoodBehavior` as a source from when this bundle began as a full copy of it, which made
-`/update-goodbehavior` run *inside this repo* try to merge from a separate project. A manifest is what an
-**adopting** project gets; this repo is the thing being adopted, so it should never carry one.
+**This bundle has no upstream.** `.claude/goodbehavior/manifest.json` is removed. It still recorded the
+ancestor repo this bundle was first copied from, which made `/update-goodbehavior` run *inside the bundle
+itself* try to merge from a separate project. A manifest is what an **adopting** project gets; the bundle is
+the thing being adopted, so it should never carry one.
 
 ## 2026-09-13 — Threat feeds act on a hit, and adopt offers them
 

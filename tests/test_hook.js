@@ -34,9 +34,16 @@ function runHook(tools, finalText, stopHookActive = false) {
   }
 }
 
-const EDIT_CODE = ["edit_file", { file_path: "src/app.py" }];
-const EDIT_DOC = ["edit_file", { file_path: "README.md" }];
-const BASH = ["shell_command", { command: "pytest -q" }];
+// HOST TOOL NAMES, deliberately. These fixtures used the .commandcode snake_case names
+// (edit_file / shell_command) while Claude Code emits Edit / Bash, so every set in done-gate missed,
+// the activity gate exited 0 on every turn, and the hook never fired — with this suite green
+// throughout. Fixtures must speak the names a real host emits. The snake_case forms are covered
+// separately below so the sibling host keeps working.
+const EDIT_CODE = ["Edit", { file_path: "src/app.py" }];
+const EDIT_DOC = ["Edit", { file_path: "README.md" }];
+const BASH = ["Bash", { command: "pytest -q" }];
+const EDIT_CODE_SNAKE = ["edit_file", { file_path: "src/app.py" }];
+const BASH_SNAKE = ["shell_command", { command: "pytest -q" }];
 const BROWSER = ["browser_navigate", { url: "http://localhost:3000" }];
 
 const CASES = [
@@ -54,6 +61,24 @@ const CASES = [
   ["bash-only turn, 'confirmed' -> allowed (execution is itself observation)", [BASH], "Done — migration ran, confirmed row counts.", 0, null],
   ["meta discussion about the gate -> allowed", [EDIT_CODE], "The done-gate is now stricter. Done.", 0, null],
   ["stop_hook_active guard -> allowed (no loop)", [EDIT_CODE], "Done. The feature is complete.", 0, null],
+
+  // Hedge scoping: a hedge about ONE item must not exempt an unbacked proof-claim about another.
+  // Observed live — "verified: X. Everything else is pending your answer." passed the whole-message
+  // hedge test while nothing had run since the edit. Under standing-proceed, where one turn closes
+  // several items, this is the ordinary shape of a final message, not an edge case.
+  ["proof about A + hedge about B, nothing run -> blocked (hedge is scoped)", [EDIT_CODE],
+    "Done. parseWindow() is verified: 90d === 90. Everything else is on hold pending your answer.", 2, "ran/observed NOTHING"],
+  ["proof AND hedge in the same clause -> allowed (a real downgrade)", [EDIT_CODE],
+    "I have not verified this yet.", 0, null],
+  ["hedge with no proof word at all -> allowed (unchanged behaviour)", [EDIT_CODE],
+    "Done with the edit, but the tests are still to run.", 0, null],
+
+  // Sibling-host names must keep working: the alias map folds hosts onto one canonical set rather
+  // than replacing one convention with another.
+  ["snake_case host: edit + unbacked 'verified' -> blocked", [EDIT_CODE_SNAKE],
+    "Done. Verified it works.", 2, "ran/observed NOTHING"],
+  ["snake_case host: edit then run -> allowed", [EDIT_CODE_SNAKE, BASH_SNAKE],
+    "Done. Verified — tests pass.", 0, null],
 ];
 
 function main() {
