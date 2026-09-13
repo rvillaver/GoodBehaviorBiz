@@ -96,6 +96,40 @@ function main() {
     const ru2 = spawnSync("node", [UPDATE, "--target", target], { encoding: "utf8" });
     const report2 = JSON.parse(ru2.stdout);
     check("re-run reports already up to date", ru2.status === 0 && report2.status === "already up to date");
+
+    // NEW must come from the source's tracked upstream, not its local HEAD. A source checkout sitting behind
+    // its own origin previously reported "already up to date" while the remote carried unmerged work — a
+    // confident wrong answer. Simulated with a local bare "origin" so the test needs no network.
+    {
+      const origin = path.join(tmp, "origin.git");
+      git(source, ["init", "--bare", "-q", origin]);
+      git(source, ["remote", "add", "origin", origin]);
+      const branch = git(source, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+      git(source, ["push", "-q", "-u", "origin", branch]);
+
+      // upstream moves one commit ahead; the source checkout stays where it is.
+      fs.appendFileSync(path.join(source, "templates/a.md"), "upstream-only line\n");
+      git(source, ["add", "-A"]);
+      git(source, ["commit", "-qm", "C"]);
+      const ahead = git(source, ["rev-parse", "HEAD"]).trim();
+      git(source, ["push", "-q", "origin", branch]);
+      git(source, ["reset", "-q", "--hard", "HEAD~1"]);           // checkout now behind its own origin
+      const behind = git(source, ["rev-parse", "HEAD"]).trim();
+
+      const ru3 = spawnSync("node", [UPDATE, "--target", target, "--dry-run"], { encoding: "utf8" });
+      const report3 = JSON.parse(ru3.stdout);
+      check("source behind its origin is NOT reported as up to date",
+        report3.status !== "already up to date", JSON.stringify(report3));
+      // status is "<base> -> <new>"; assert the TARGET side. `behind` equals the base here, so a plain
+      // "doesn't mention behind" check would fail for the right reason and hide the real assertion.
+      const newSide = String(report3.status).split(" -> ")[1];
+      check("NEW resolves to the tracked upstream, not local HEAD",
+        newSide === ahead.slice(0, 8),
+        `newSide=${newSide} ahead=${ahead.slice(0,8)} behind=${behind.slice(0,8)}`);
+      check("report names the ref it compared against", report3.ref === `origin/${branch}`, report3.ref);
+      check("warns that the source checkout is not at its upstream",
+        (report3.warnings || []).some((w) => /not at origin\//.test(w)), JSON.stringify(report3.warnings));
+    }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

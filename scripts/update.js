@@ -6,7 +6,7 @@
  * git 3-way merge: base = the commit in the manifest, ours = local, theirs = new upstream. Untouched
  * files fast-forward; adapted files merge; genuine conflicts get markers for the human.
  *
- * Usage: node scripts/update.js --target /path/to/project [--source /override/path] [--dry-run]
+ * Usage: node scripts/update.js --target /path/to/project [--source /override/path] [--dry-run] [--fetch]
  *
  * Guarantees: never touches settings.json; a file whose sha256 matches the manifest is fast-forwarded;
  * adapted files are 3-way merged (conflicts written WITH markers + reported, sha256 left stale so a
@@ -55,11 +55,13 @@ function isoSeconds() { return new Date().toISOString().replace(/\.\d{3}Z$/, "+0
 
 function main() {
   const argv = process.argv.slice(2);
-  let target = null, sourceOverride = null, dryRun = false;
+  let target = null, sourceOverride = null, dryRun = false, fetchFirst = false;
+  const preWarnings = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--target") target = argv[++i];
     else if (argv[i] === "--source") sourceOverride = argv[++i];
     else if (argv[i] === "--dry-run") dryRun = true;
+    else if (argv[i] === "--fetch") fetchFirst = true;
   }
   if (!target) { process.stderr.write("error: --target is required\n"); return 1; }
   target = path.resolve(target);
@@ -77,12 +79,33 @@ function main() {
     out({ status: "manifest sourceCommit is null — no merge base; re-adopt or overwrite manually (never silently)" });
     return 1;
   }
-  const newCommit = ((git(source, ["rev-parse", "HEAD"], false) || "")).trim();
-  if (!newCommit) { out({ status: "could not resolve source HEAD" }); return 1; }
-  if (newCommit === baseCommit) { out({ status: "already up to date", commit: newCommit }); return 0; }
+  // NEW is the source's tracked upstream when it has one, NOT its local HEAD. A source checkout sitting behind
+  // its own origin made this report "already up to date" while the remote carried unmerged work — a confident
+  // wrong answer, which is worse than an error. Falls back to HEAD when the branch tracks nothing.
+  // --fetch refreshes the remote ref first; without it the comparison uses whatever the source already has,
+  // so the report says which ref was used and warns when the local mirror could be stale.
+  if (fetchFirst) {
+    const fetched = git(source, ["fetch", "--quiet"], false);
+    if (fetched === null) preWarnings.push("git fetch failed in the source; comparing against the local mirror");
+  }
+  const upstreamRef = (git(source, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], false) || "").trim();
+  const newRef = upstreamRef || "HEAD";
+  const newCommit = ((git(source, ["rev-parse", newRef], false) || "")).trim();
+  if (!newCommit) { out({ status: `could not resolve source ${newRef}` }); return 1; }
+  if (upstreamRef && !fetchFirst) {
+    preWarnings.push(`compared against ${upstreamRef} as last fetched into the source; re-run with --fetch to refresh it`);
+  }
+  const headCommit = ((git(source, ["rev-parse", "HEAD"], false) || "")).trim();
+  if (upstreamRef && headCommit && headCommit !== newCommit) {
+    preWarnings.push(`source checkout (HEAD ${headCommit.slice(0, 8)}) is not at ${upstreamRef} (${newCommit.slice(0, 8)}); merging from ${upstreamRef}`);
+  }
+  if (newCommit === baseCommit) {
+    out({ status: "already up to date", commit: newCommit, ref: newRef, warnings: preWarnings });
+    return 0;
+  }
 
-  const report = { status: `${baseCommit.slice(0, 8)} -> ${newCommit.slice(0, 8)}`, unchanged: [], updated: [],
-                   merged: [], conflict: [], restored: [], removed_upstream: [], warnings: [] };
+  const report = { status: `${baseCommit.slice(0, 8)} -> ${newCommit.slice(0, 8)}`, ref: newRef, unchanged: [], updated: [],
+                   merged: [], conflict: [], restored: [], removed_upstream: [], warnings: [...preWarnings] };
 
   const keys = Object.keys(manifest.files || {}).sort();
   for (const key of keys) {

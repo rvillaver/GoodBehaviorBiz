@@ -3,6 +3,26 @@
 Every entry here is a unit a downstream project will 3-way-merge via `/update-goodbehavior` — write entries so an
 adopter skimming before an update knows what's coming and why.
 
+## 2026-09-13 — update.js resolves NEW from the tracked upstream; the ancestor pointer is gone
+
+**Bug: `update.js` reported "already up to date" while the source's remote carried unmerged work.** It resolved
+the target commit with `rev-parse HEAD`, so a source checkout sitting behind its own origin produced a confident
+wrong answer — the worst kind, since the caller stops looking.
+
+- **NEW now comes from the source's tracked upstream** (`@{u}`, e.g. `origin/master`), falling back to `HEAD`
+  when the branch tracks nothing. The report names the ref it used.
+- **`--fetch`** refreshes the remote ref first. Without it the comparison uses whatever the source already has,
+  and the report warns that the mirror may be stale rather than implying it is current.
+- **Warns when the source checkout is not at its upstream**, naming both commits, so "merging from a ref you
+  have not checked out" is stated rather than inferred.
+- Regression test drives a real local bare remote: source pushed ahead, checkout reset behind, and the update
+  must not say "already up to date".
+
+**GoodBehaviorBiz has no upstream.** `.claude/goodbehavior/manifest.json` is removed. It recorded
+`/Users/rv/work/GoodBehavior` as a source from when this bundle began as a full copy of it, which made
+`/update-goodbehavior` run *inside this repo* try to merge from a separate project. A manifest is what an
+**adopting** project gets; this repo is the thing being adopted, so it should never carry one.
+
 ## 2026-09-13 — Threat feeds act on a hit, and adopt offers them
 
 Feed hits were audited and nothing else, so an opted-in project got a log line when a command contained a URL

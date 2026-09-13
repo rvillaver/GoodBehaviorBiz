@@ -14,8 +14,14 @@ See [[reference-blitzpi-guardrails]].
 
 **Stack (user-confirmed 2026-08-28):** **Python-free / single-runtime = plain JavaScript on Node** (no TS build step).
 The whole toolchain was ported off Python at creation (done-gate/install/update/tests → `.js`), matching CMDBiz and
-BlitzPi's Node runtime. Upstream = `/Users/rv/work/GoodBehavior` @ `a152e81` (manifest-tracked; `/update` 3-way-merges
-the 6 language-agnostic template/profile files, so the node divergence won't fight upstream).
+BlitzPi's Node runtime.
+
+**GoodBehaviorBiz is its own root — it has no upstream** (confirmed 2026-09-13). It began as a full-copy of
+`/Users/rv/work/GoodBehavior` @ `a152e81` and briefly kept a manifest pointing there so six language-agnostic
+templates could still 3-way-merge. That pointer was removed: the two are separate projects now, the bundle here
+carries work the ancestor never had, and a manifest naming a foreign source made `/update-goodbehavior` run *inside
+this repo* try to merge from it. **Don't re-add a manifest here.** `.claude/goodbehavior/manifest.json` is a file an
+ADOPTING project gets; this repo is the thing being adopted.
 
 **Confirmed approach:**
 - verify target = **localhost** (run the real agent/hook/skills; no deployed URL; no push=deploy risk).
