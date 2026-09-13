@@ -4,7 +4,7 @@ A demo/reference-cross-checked catalog of the gap between what exists and what's
 (one per pass), grouped by <journey / feature area / page>. Roll the gaps into [../plans/ROADMAP.md](../plans/ROADMAP.md).
 
 ## Method (non-negotiable)
-- The gap = the concrete delta vs. the reference, element by element — not "looks different."
+- **The gap = the concrete delta vs. the reference, element by element.** "Looks different" is not a gap.
 - Every claim cites the real code/screen/endpoint (not memory).
 - Severity-tag each gap: P0 (breaks parity) / P1 / P2 (polish). If unchecked, say so.
 

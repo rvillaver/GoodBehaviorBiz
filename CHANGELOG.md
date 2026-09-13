@@ -3,6 +3,25 @@
 Every entry here is a unit a downstream project will 3-way-merge via `/update-goodbehavior` — write entries so an
 adopter skimming before an update knows what's coming and why.
 
+## 2026-09-13 — write-goodbehavior, a rule-fingerprint gate, and a Register doctrine
+
+- **`/write-goodbehavior`** — edits a document so every word either enforces or is cut. Classify each span
+  RULE / RATIONALE / REFERENCE and spend emphasis only on RULE; rationale goes plain; REFERENCE is untouched.
+- **`scripts/write/fingerprint.js`** — extracts every obligation a document imposes (obligation clauses, bolded
+  spans, headings) and fuzzy-matches before against after, so a prose rewrite can be shown not to have dropped a
+  rule. It fails loudly and is not a proof: adjudicate every flag by grepping the rewritten file.
+- **`scripts/write/patterns.js`** — counts six register patterns per 1000 words. Three are regex proxies, usable
+  as a consistent yardstick across two versions of one document, not as ground truth.
+- **`CLAUDE.md` gains a "Register" section** — governs the agent's own messages, not only documents it was asked
+  to edit: bold a rule and never a moral, use the punctuation that names the relation, count the real items.
+- **All shipped prose de-inflated** — `CLAUDE.md`, nine skills, five templates and the development profile.
+  Em-dash density across shipped prose roughly halved with word count unchanged. Every obligation was checked
+  through the fingerprint gate; none were dropped. Rules keep their bold, rationale lost it.
+
+**For adopters:** this touches nearly every tracked file, so `/update-goodbehavior` will 3-way-merge more than
+usual. Locally-adapted files merge; genuinely conflicting edits get markers. No rule text was removed, so a
+conflict here is a wording collision, not a lost instruction.
+
 ## 2026-09-11 — Guard layer: hard shapes, zones, injection flagging, unified audit, owner lock
 
 Claude-native, no BlitzPi dependency — BlitzPi's checkpoint architecture (threat-detection, zones, permissions) was

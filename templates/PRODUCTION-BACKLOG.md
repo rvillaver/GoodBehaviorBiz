@@ -1,8 +1,8 @@
 # Production backlog
 
-Work deliberately deferred out of the active [ROADMAP](ROADMAP.md) — low visible ROI, large+invisible refactors,
-blocked items, or out-of-scope. Each entry says **why** it's deferred and **what unblocks it**, so the decision is
-auditable and revisitable. Don't let this become a dump — re-evaluate periodically.
+Work deliberately deferred out of the active [ROADMAP](ROADMAP.md): low visible ROI, large+invisible refactors,
+blocked items, or out-of-scope. **Each entry says why it's deferred and what unblocks it**, so the decision is
+auditable and revisitable. **Don't let this become a dump. Re-evaluate periodically.**
 
 ## <Item title>
 *(deferred YYYY-MM-DD — reason / who decided)*
