@@ -259,6 +259,36 @@ function main() {
       check("feeds: a feed miss never changes the zone-ladder decision",
         decision === "ask" && !auditLines.some((l) => String(l.shape || "").startsWith("feed:")));
     }
+    // Degradation: every malformed-data path must fall toward LESS blocking, never toward a crash and never
+    // toward denying everything (the guard's outer fail-closed path would do exactly that).
+    {
+      const bad = (rulesJson, manifestJson) => {
+        const dir = fs.mkdtempSync(path.join(TEST_HOME_BASE, "feeds-bad-"));
+        fs.writeFileSync(path.join(dir, "opt-in"), "x");
+        fs.mkdirSync(path.join(dir, "urls"), { recursive: true });
+        fs.writeFileSync(path.join(dir, "urls", "rules.json"), rulesJson);
+        if (manifestJson !== null) fs.writeFileSync(path.join(dir, "urls", "manifest.json"), manifestJson);
+        return dir;
+      };
+      const GOOD = JSON.stringify({ rules: [URLRULE], skipped: [] });
+      const FRESH = JSON.stringify({ name: "urls", fetched_at: new Date().toISOString() });
+      const HIT = "curl -o x http://bad.example.invalid/x";
+
+      check("feeds/degrade: rules but NO manifest -> ask (unknown age is stale, never fresh)",
+        run(HIT, { dir: bad(GOOD, null) }).decision === "ask");
+      check("feeds/degrade: corrupt manifest JSON -> ask, not a crash",
+        run(HIT, { dir: bad(GOOD, "not json{{") }).decision === "ask");
+      check("feeds/degrade: fetched_at in the FUTURE -> ask (negative age rejected)",
+        run(HIT, { dir: bad(GOOD, JSON.stringify({ name: "urls", fetched_at: "2099-01-01T00:00:00Z" })) }).decision === "ask");
+      check("feeds/degrade: corrupt rules.json -> no hit, command passes through",
+        run(HIT, { dir: bad("garbage{{", FRESH) }).decision === null);
+      check("feeds/degrade: empty rules.json -> no hit",
+        run(HIT, { dir: bad("", FRESH) }).decision === null);
+      check("feeds/degrade: feeds dir missing entirely -> no hit",
+        run(HIT, { dir: path.join(TEST_HOME_BASE, "does-not-exist") }).decision === null);
+      check("feeds/degrade: a hard shape still denies with feeds live",
+        run("sudo ls", { dir: bad(GOOD, FRESH) }).decision === "deny");
+    }
   }
 
   console.log(`test_guard: ${total - failures}/${total} passed`);
