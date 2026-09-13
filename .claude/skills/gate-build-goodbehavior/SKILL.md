@@ -18,7 +18,9 @@ item at a time, to the real definition of done.
    against sources; a delivered artifact walked + fact-checked), and capture that profile's evidence. **A passing test
    alone is not verify.**
 4. **Record learnings** — any non-obvious trap, correction, or build/deploy fact → `/learn-goodbehavior`.
-5. **Status** — mark the item done **only with evidence**; otherwise "partial/blocked" + log the blocker to the backlog.
+5. **Write it down plainly** — if the item produced or changed a document a human will read (a plan, a report, a
+   README, a memory), run `/write-goodbehavior` on it **before** marking the item done.
+6. **Status** — mark the item done **only with evidence**; otherwise "partial/blocked" + log the blocker to the backlog.
 
 ## Gate before the next phase
 Loop-review the phase until **every item has concrete evidence** (or is explicitly deferred to the backlog). Record

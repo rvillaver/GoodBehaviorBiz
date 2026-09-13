@@ -146,7 +146,9 @@ Works the **NOW** phase of the roadmap, **one item at a time**, to the real defi
    UAT case `[ ] Pass → ✔`. **A green test alone is not verification.**
 4. **Record learnings** (`/learn-goodbehavior`) — any non-obvious trap/correction/build-deploy fact, so it isn't
    relearned next session.
-5. **Status** — mark the item done **only with evidence** (`✔`); otherwise "partial/blocked" (`⚠`) and log the blocker.
+5. **Write it down plainly** (`/write-goodbehavior`) — if the item produced or changed a document a human will read,
+   edit it so rules keep their emphasis and rationale goes plain, under a gate that flags any rule the rewrite dropped.
+6. **Status** — mark the item done **only with evidence** (`✔`); otherwise "partial/blocked" (`⚠`) and log the blocker.
 
 **Gate before the next phase:** loop the phase until *every* item has concrete evidence (or is explicitly backlogged).
 A phase never advances on a `⚠` item. Don't sidetrack — log tangents to the backlog and keep the throughline.
