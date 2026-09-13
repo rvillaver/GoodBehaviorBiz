@@ -32,8 +32,9 @@ Write a short, plain-language summary a non-technical owner can read in under a 
   commands tried to touch files outside the project and were held for confirmation."
 - **What got flagged, not blocked** (`annotated`, the injection layer, and fast-lane gray-zone `allow`s) — **make
   the distinction clear: these ran, the guard only left a note. Don't let a reader conflate this with `deny`.**
-- **What the threat feeds caught** (`monitor`, shape named `feed:<feed>:<rule-id>`) — opt-in, monitor-only by
-  design (see `/feeds-goodbehavior`): these ran too, same as `annotated`. **Translate the feed name**
+- **What the threat feeds caught** (shape named `feed:<feed>:<rule-id>`) — opt-in (see `/feeds-goodbehavior`).
+  **Report these by their decision, not as one bucket**: a `deny` line means the command was blocked, `ask`
+  means it was held for confirmation, `monitor` means it ran and the guard only left a note. **Translate the feed name**
   (`commands`→"a known-risky command shape", `secrets`→"a credential-shaped pattern", `urls`→"a URL listed as
   distributing malware") **rather than printing the raw rule id.**
 - **If `notable` is empty** — say so plainly ("nothing notable this period — N events, all normal in-project

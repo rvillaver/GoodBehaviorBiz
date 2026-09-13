@@ -67,7 +67,8 @@ The three external threat feeds (Sigma command shapes, gitleaks secrets, URLhaus
 `/feeds-goodbehavior`) are **not** part of this managed deployment. `allowManagedHooksOnly` locks which *hooks*
 run; it says nothing about the feeds they optionally check. Feed opt-in is a separate, per-machine step
 (`node scripts/feeds.js opt-in`) — enforcing the guard hooks on does not silently turn feeds on too, and feed
-matches are monitor-mode only (audited, never blocking) regardless of how the hooks themselves were deployed.
+a hit's disposition depends on match precision, not on how the hooks were deployed: a fresh verbatim URLhaus hit
+denies, Sigma and credential shapes ask, and credential shapes only audit in the fast lane.
 
 ## The honest caveat
 

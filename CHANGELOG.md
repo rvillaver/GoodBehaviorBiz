@@ -3,6 +3,33 @@
 Every entry here is a unit a downstream project will 3-way-merge via `/update-goodbehavior` — write entries so an
 adopter skimming before an update knows what's coming and why.
 
+## 2026-09-13 — Threat feeds act on a hit, and adopt offers them
+
+Feed hits were audited and nothing else, so an opted-in project got a log line when a command contained a URL
+listed as actively distributing malware. A hit now earns a disposition, and **disposition tracks match precision,
+not the lane**:
+
+| feed | a hit means | guarded | fast |
+|---|---|---|---|
+| `urls` | the exact URL is on a live malware-distribution list | **deny** | **deny** |
+| `commands` | the command shape matches a known-malicious Sigma rule | **ask** | **ask** |
+| `secrets` | a credential-shaped string is in the command text | **ask** | **monitor** |
+
+- `urls` denies because a poisoned entry can only block commands containing that exact string: bounded, and
+  recoverable with `feeds rollback`. A bad regex can match everything and once did, which is why `secrets` stays
+  cautious. Blocking cannot un-leak a credential already in the command, so there the audit line is the product.
+- **Stale data downgrades `urls` from deny to ask**, with a reason that says so. Budgets: `urls` 7 days (it lists
+  URLs *currently* serving malware), others 30.
+- **Every deny and ask carries a plain-language reason** naming the feed and rule id and never the matched text,
+  so a `secrets` prompt cannot copy the credential into the transcript or the audit trail.
+- Feed evaluation is wrapped so a fault there degrades to monitor-only rather than riding the guard's
+  fail-closed path. A bug in feed logic must never deny every command on the machine.
+- `feeds status` reports `fetched_at`, `age_days` and `stale` per feed, and warns when data is past its budget.
+- **`/adopt-goodbehavior` now checks feed state and offers the opt-in once**, records the answer either way, and
+  surfaces stale data. Previously nothing offered them, so the feeds never activated.
+
+Hard shapes, zones and lanes are unchanged. The guard is still a blocklist net, not a sandbox.
+
 ## 2026-09-13 — write-goodbehavior, a rule-fingerprint gate, and a Register doctrine
 
 - **`/write-goodbehavior`** — edits a document so every word either enforces or is cut. Classify each span

@@ -41,10 +41,11 @@ function runHook(commandOrFn, { toolName = "Bash", env = {}, rawStdin = null, se
     encoding: "utf8",
     env: { ...process.env, CLAUDE_PROJECT_DIR: scratch, ...env },
   });
-  let decision = null;
+  let decision = null, reason = "";
   try {
     const out = JSON.parse(r.stdout || "{}");
     decision = (out.hookSpecificOutput && out.hookSpecificOutput.permissionDecision) || null;
+    reason = (out.hookSpecificOutput && out.hookSpecificOutput.permissionDecisionReason) || "";
   } catch (e) { /* no stdout JSON = no explicit decision (allow-through-silence) */ }
   const auditDir = path.join(scratch, ".claude", "goodbehavior", "audit");
   let auditLines = [];
@@ -54,7 +55,7 @@ function runHook(commandOrFn, { toolName = "Bash", env = {}, rawStdin = null, se
     }
   }
   fs.rmSync(scratch, { recursive: true, force: true });
-  return { status: r.status, decision, auditLines, scratch };
+  return { status: r.status, decision, reason, auditLines, scratch };
 }
 
 // A command run relative to a fresh scratch project (CLAUDE_PROJECT_DIR), with its sibling directory named —
@@ -177,60 +178,86 @@ function main() {
       `decision=${decision} audit=${JSON.stringify(auditLines)}`);
   }
 
-  // Phase 6 — threat feeds (opt-in, monitor-only). A small hand-built fixture feeds dir, not live network
-  // data (that's separately live-verified and recorded in the phase archive) — kept fast and deterministic.
-  // Regression coverage for a real bug caught this session: guard-bash's inlined secrets-matcher passed a
-  // gitleaks-shaped {regex,flags} rule straight into a helper expecting {source,flags}; pattern.source came
-  // back undefined, and `new RegExp(undefined)` matches every string — every command "matched" every secret.
+  // Threat feeds (opt-in). Disposition tracks MATCH PRECISION, not the lane: urls deny (exact match, bounded
+  // blast radius), commands ask, secrets ask in guarded / monitor in fast. Stale data downgrades deny -> ask.
+  // A small hand-built fixture feeds dir, not live network data — kept fast and deterministic.
+  // Regression coverage for a real bug caught earlier: guard-bash's inlined secrets-matcher passed a
+  // gitleaks-shaped {regex,flags} rule into a helper expecting {source,flags}; pattern.source came back
+  // undefined, and `new RegExp(undefined)` matches every string — every command "matched" every secret.
   {
-    const feedsDir = fs.mkdtempSync(path.join(TEST_HOME_BASE, "feeds-"));
-    fs.writeFileSync(path.join(feedsDir, "opt-in"), new Date().toISOString());
-    const write = (name, rules) => {
-      fs.mkdirSync(path.join(feedsDir, name), { recursive: true });
-      fs.writeFileSync(path.join(feedsDir, name, "rules.json"), JSON.stringify({ rules, skipped: [] }));
+    const SECRET = { id: "fake-aws-key", category: "secret", severity: "high", regex: "\\bAKIA[A-Z0-9]{16}\\b", flags: "" };
+    const SIGMA = { id: "fake-nc-listener", category: "command", severity: "high",
+      sigma: { selections: { sel: [{ field: "Image", all: false, patterns: [{ source: "/nc$", flags: "i" }] }] }, condition: { t: "sel", name: "sel" } } };
+    const URLRULE = { id: "fake-listed-url", category: "url", severity: "high", set: { urls: ["http://bad.example.invalid/x"] } };
+
+    // ageDays controls manifest.fetched_at, which is what freshness is judged on.
+    const mkFeeds = (spec, ageDays = 0) => {
+      const dir = fs.mkdtempSync(path.join(TEST_HOME_BASE, "feeds-"));
+      if (spec.optIn !== false) fs.writeFileSync(path.join(dir, "opt-in"), new Date().toISOString());
+      for (const [name, rules] of Object.entries(spec.feeds || {})) {
+        fs.mkdirSync(path.join(dir, name), { recursive: true });
+        fs.writeFileSync(path.join(dir, name, "rules.json"), JSON.stringify({ rules, skipped: [] }));
+        fs.writeFileSync(path.join(dir, name, "manifest.json"),
+          JSON.stringify({ name, fetched_at: new Date(Date.now() - ageDays * 86400000).toISOString() }));
+      }
+      return dir;
     };
-    write("secrets", [{ id: "fake-aws-key", category: "secret", severity: "high", regex: "\\bAKIA[A-Z0-9]{16}\\b", flags: "" }]);
-    write("commands", [{
-      id: "fake-nc-listener", category: "command", severity: "high",
-      sigma: { selections: { sel: [{ field: "Image", all: false, patterns: [{ source: "/nc$", flags: "i" }] }] }, condition: { t: "sel", name: "sel" } },
-    }]);
-    write("urls", [{ id: "fake-listed-url", category: "url", severity: "high", set: { urls: ["http://bad.example.invalid/x"] } }]);
-
-    const withFeeds = (cmd) => runHook(cmd, { env: { GOODBEHAVIOR_FEEDS_DIR: feedsDir } });
+    const ALL = { feeds: { secrets: [SECRET], commands: [SIGMA], urls: [URLRULE] } };
+    const fresh = mkFeeds(ALL, 0);
+    const run = (cmd, opts = {}) => runHook(cmd, { env: { GOODBEHAVIOR_FEEDS_DIR: opts.dir || fresh }, lane: opts.lane || null });
 
     {
-      // same rules present on disk, but no opt-in marker -> must be a silent no-op, not an error or a hit.
-      const notOptedInDir = fs.mkdtempSync(path.join(TEST_HOME_BASE, "feeds-not-opted-in-"));
-      const write2 = (name, rules) => {
-        fs.mkdirSync(path.join(notOptedInDir, name), { recursive: true });
-        fs.writeFileSync(path.join(notOptedInDir, name, "rules.json"), JSON.stringify({ rules, skipped: [] }));
-      };
-      write2("secrets", [{ id: "fake-aws-key", category: "secret", severity: "high", regex: "\\bAKIA[A-Z0-9]{16}\\b", flags: "" }]);
-      const { auditLines } = runHook("echo AKIAABCDEFGHIJKLMNOP", { env: { GOODBEHAVIOR_FEEDS_DIR: notOptedInDir } });
-      check("feeds: rules present but no opt-in marker -> no monitor hit (opt-in gate itself works)",
-        !auditLines.some((l) => l.decision === "monitor"));
+      const dir = mkFeeds({ optIn: false, feeds: { secrets: [SECRET] } });
+      const { auditLines, decision } = run("echo AKIAABCDEFGHIJKLMNOP", { dir });
+      check("feeds: no opt-in marker -> silent no-op (opt-in gate itself works)",
+        decision === null && !auditLines.some((l) => String(l.shape || "").startsWith("feed:")));
     }
     {
-      const { auditLines } = withFeeds("echo AKIAABCDEFGHIJKLMNOP");
-      check("feeds: matching secret is flagged monitor", auditLines.some((l) => l.decision === "monitor" && l.shape === "feed:secrets:fake-aws-key"));
+      const { decision, auditLines } = run("curl -o x http://bad.example.invalid/x");
+      check("feeds/urls: fresh verbatim hit DENIES", decision === "deny", `decision=${decision}`);
+      check("feeds/urls: deny is audited with the rule id",
+        auditLines.some((l) => l.decision === "deny" && l.shape === "feed:urls:fake-listed-url"));
     }
     {
-      const { auditLines, decision } = withFeeds("git status");
-      check("feeds: benign command matches NOTHING (regression: undefined regex source must not match everything)",
-        !auditLines.some((l) => l.decision === "monitor"), JSON.stringify(auditLines));
+      const { decision } = run("curl -o x http://bad.example.invalid/x", { lane: "fast" });
+      check("feeds/urls: denies in the fast lane too (precision, not lane)", decision === "deny");
+    }
+    {
+      const stale = mkFeeds({ feeds: { urls: [URLRULE] } }, 30);
+      const { decision, reason } = run("curl -o x http://bad.example.invalid/x", { dir: stale });
+      check("feeds/urls: STALE list downgrades deny -> ask", decision === "ask", `decision=${decision}`);
+      check("feeds/urls: stale reason says why it wasn't blocked", /stale/i.test(reason), reason);
+    }
+    {
+      const { decision } = run("nc -zv localhost 8080"); // no exec flag -> not our own hard shape
+      check("feeds/commands: sigma hit ASKS", decision === "ask", `decision=${decision}`);
+    }
+    {
+      const { decision, reason } = run("echo AKIAABCDEFGHIJKLMNOP");
+      check("feeds/secrets: ASKS in the guarded lane", decision === "ask", `decision=${decision}`);
+      check("feeds/secrets: reason NEVER echoes the matched secret",
+        !reason.includes("AKIAABCDEFGHIJKLMNOP") && reason.includes("feed:secrets:fake-aws-key"), reason);
+    }
+    {
+      const { decision, auditLines } = run("echo AKIAABCDEFGHIJKLMNOP", { lane: "fast" });
+      check("feeds/secrets: MONITORS in the fast lane (noisiest feed defers to the lane)",
+        decision === null && auditLines.some((l) => l.decision === "monitor" && l.shape === "feed:secrets:fake-aws-key"),
+        `decision=${decision}`);
+    }
+    {
+      const { decision } = run("curl -o x http://bad.example.invalid/x && echo AKIAABCDEFGHIJKLMNOP");
+      check("feeds: strongest disposition wins when several feeds hit", decision === "deny");
+    }
+    {
+      const { auditLines, decision } = run("git status");
+      check("feeds: benign command matches NOTHING (regression: undefined regex must not match everything)",
+        !auditLines.some((l) => String(l.shape || "").startsWith("feed:")), JSON.stringify(auditLines));
       check("feeds: benign command's own decision is unaffected", decision === null);
     }
     {
-      const { auditLines } = withFeeds("nc -zv localhost 8080"); // no exec flag -> not our own hard shape
-      check("feeds: matching sigma command rule is flagged monitor", auditLines.some((l) => l.decision === "monitor" && l.shape === "feed:commands:fake-nc-listener"));
-    }
-    {
-      const { auditLines } = withFeeds("curl -o x http://bad.example.invalid/x");
-      check("feeds: matching urlhaus rule is flagged monitor", auditLines.some((l) => l.decision === "monitor" && l.shape === "feed:urls:fake-listed-url"));
-    }
-    {
-      const { auditLines, decision } = withFeeds("rm -rf ~/Downloads/tmpdir"); // gray zone -> ask, no feed match expected
-      check("feeds: a feed miss never changes the zone-ladder decision", decision === "ask" && !auditLines.some((l) => l.decision === "monitor"));
+      const { auditLines, decision } = run("rm -rf ~/Downloads/tmpdir"); // gray zone -> ask, no feed match
+      check("feeds: a feed miss never changes the zone-ladder decision",
+        decision === "ask" && !auditLines.some((l) => String(l.shape || "").startsWith("feed:")));
     }
   }
 

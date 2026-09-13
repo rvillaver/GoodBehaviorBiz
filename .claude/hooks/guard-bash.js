@@ -424,6 +424,66 @@ function readFeedRules(name) {
   } catch (e) { return []; } // not fetched yet, or unreadable — no matches, never an error
 }
 
+/** Age in days of a feed's data, from its manifest `fetched_at`. null when unknown (never fetched, or
+ *  unreadable) — callers treat null as STALE, never as fresh: an unknown age is not evidence of freshness. */
+function feedAgeDays(name) {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(feedsDir(), name, "manifest.json"), "utf8"));
+    if (!m.fetched_at) return null;
+    const ms = Date.now() - new Date(m.fetched_at).getTime();
+    return ms >= 0 ? ms / 86400000 : null;
+  } catch (e) { return null; }
+}
+
+// How long a feed's data stays good enough to act on. `urls` is the short one on purpose: URLhaus lists URLs
+// *currently* distributing malware, so a stale copy asserts a fact it can no longer back.
+const FEED_MAX_AGE_DAYS = { urls: 7, commands: 30, secrets: 30 };
+
+/** deny | ask | monitor for one feed hit. Disposition tracks MATCH PRECISION, not the lane:
+ *   urls     — exact string vs a live malware-distribution list. Denied. A bad entry can only block commands
+ *              containing that exact URL, so the blast radius of a poisoned rule is bounded and recoverable
+ *              (`feeds rollback`). Downgraded to ask when the list is stale.
+ *   commands — Sigma, judged on CommandLine+Image only (rules needing unavailable fields are skipped at
+ *              compile time, never guessed). Human judgment is exactly what's wanted: ask.
+ *   secrets  — translated Go-RE2 regexes; the one feed with a demonstrated over-match (see checkFeeds).
+ *              Asks where a human is present, monitors in the fast lane. Blocking cannot un-leak a credential
+ *              that is already in the command, so the audit line is the real product here.
+ * Lane is consulted ONLY for `secrets` — the noisiest feed defers to the lane; the precise ones don't. */
+function feedDisposition(feed, lane) {
+  const stale = !(feedAgeDays(feed) !== null && feedAgeDays(feed) <= (FEED_MAX_AGE_DAYS[feed] || 30));
+  if (feed === "urls") return stale ? "ask" : "deny";
+  if (feed === "commands") return "ask";
+  if (feed === "secrets") return lane === "guarded" ? "ask" : "monitor";
+  return "monitor";
+}
+
+/** Plain-language why, for a human deciding in the moment. Names the feed and rule id, NEVER the matched
+ *  text — same redaction discipline as hard shapes, and it matters most for `secrets`, where echoing the
+ *  match would copy the credential into the audit trail and the transcript. */
+function feedReason(feed, id, disposition) {
+  const age = feedAgeDays(feed);
+  const when = age === null ? "age unknown" : `list fetched ${Math.floor(age)}d ago`;
+  const tag = `feed:${feed}:${id}`;
+  if (feed === "urls") {
+    return disposition === "deny"
+      ? `GoodBehavior guard-bash: blocked — this command contains a URL that URLhaus lists as currently ` +
+        `distributing malware (${tag}, ${when}). The URL is not repeated here; the audit trail has the rule id.`
+      : `GoodBehavior guard-bash: this command contains a URL listed by URLhaus as distributing malware ` +
+        `(${tag}), but the list is stale (${when}) — held for your confirmation rather than blocked, because ` +
+        `a stale list can no longer back the claim. Refresh with \`feeds update urls\`.`;
+  }
+  if (feed === "commands") {
+    return `GoodBehavior guard-bash: this command matches a known-malicious command shape from the Sigma ` +
+      `ruleset (${tag}, ${when}). Confirm only if you recognise it as legitimate for this project.`;
+  }
+  if (feed === "secrets") {
+    return `GoodBehavior guard-bash: this command contains a credential-shaped pattern (${tag}, ${when}). ` +
+      `If that is a real secret it will land in this project's audit trail and your shell history. Confirm ` +
+      `only if you meant to pass it on the command line.`;
+  }
+  return `GoodBehavior guard-bash: matched ${tag} (${when}).`;
+}
+
 function feedMatchesPattern(text, pattern) {
   try { return new RegExp(pattern.source, pattern.flags).test(text); } catch (e) { return false; }
 }
@@ -570,13 +630,30 @@ function main(input) {
     process.exit(0);
   }
 
-  // Threat feeds (Phase 6, opt-in): never changes the decision below, only adds extra audited "monitor"
-  // lines when a command matches a compiled feed rule (named id only — same redaction discipline as shapes).
-  for (const hit of checkFeeds(command)) {
-    writeAudit(cwd, {
-      timestamp: new Date().toISOString(), tool: "Bash", shape: `feed:${hit.feed}:${hit.id}`,
-      decision: "monitor", session_id: sessionId,
-    });
+  // Threat feeds (opt-in): every hit is audited with the disposition it earned; the strongest one can deny or
+  // ask. Wrapped so a fault in feed logic degrades to monitor-only rather than riding the outer fail-closed
+  // path — a bug here must never deny every command on the machine.
+  let feedVerdict = null; // {disposition, feed, id}
+  try {
+    const feedLane = readLane(cwd);
+    const RANK = { monitor: 0, ask: 1, deny: 2 };
+    for (const hit of checkFeeds(command)) {
+      const disposition = feedDisposition(hit.feed, feedLane);
+      writeAudit(cwd, {
+        timestamp: new Date().toISOString(), tool: "Bash", shape: `feed:${hit.feed}:${hit.id}`,
+        decision: disposition, session_id: sessionId,
+      });
+      if (!feedVerdict || RANK[disposition] > RANK[feedVerdict.disposition]) feedVerdict = { disposition, ...hit };
+    }
+  } catch (e) { feedVerdict = null; }
+
+  if (feedVerdict && feedVerdict.disposition === "deny") {
+    emitDeny(feedReason(feedVerdict.feed, feedVerdict.id, "deny"));
+    process.exit(0);
+  }
+  if (feedVerdict && feedVerdict.disposition === "ask") {
+    emitAsk(feedReason(feedVerdict.feed, feedVerdict.id, "ask"));
+    process.exit(0);
   }
 
   // Past the hard shapes: does this command touch somewhere outside the project? (Phase 3 zone ladder.)

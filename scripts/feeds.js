@@ -13,6 +13,10 @@
 "use strict";
 const { FEEDS, feedDef, FeedStore } = require("./feeds/store");
 
+// Must match FEED_MAX_AGE_DAYS in .claude/hooks/guard-bash.js — the guard decides disposition on it, this
+// only reports it. `urls` is short on purpose: URLhaus lists URLs *currently* distributing malware.
+const FEED_MAX_AGE_DAYS = { urls: 7, commands: 30, secrets: 30 };
+
 function usage() {
   process.stdout.write(
     "Usage: node scripts/feeds.js <command>\n" +
@@ -41,7 +45,24 @@ async function main() {
     return 0;
   }
   if (cmd === "status") {
-    process.stdout.write(JSON.stringify({ decision: store.decision() || "not asked", feeds: store.list() }, null, 2) + "\n");
+    // Freshness is part of status, not a detail: guard-bash only DENIES on a urls hit while that list is
+    // fresh, and downgrades to ask once it is stale. A status that hid the age would let an owner believe
+    // they are protected by data that can no longer back the claim.
+    const feeds = store.list().map((f) => {
+      const m = store.manifest ? store.manifest(f.name) : null;
+      const fetchedAt = m && m.fetched_at ? m.fetched_at : null;
+      const ageDays = fetchedAt ? Math.floor((Date.now() - new Date(fetchedAt).getTime()) / 86400000) : null;
+      const maxAge = FEED_MAX_AGE_DAYS[f.name] || 30;
+      return { ...f, fetched_at: fetchedAt, age_days: ageDays, max_age_days: maxAge,
+        stale: f.installed ? !(ageDays !== null && ageDays <= maxAge) : null };
+    });
+    const staleNames = feeds.filter((f) => f.stale).map((f) => f.name);
+    const out = { decision: store.decision() || "not asked", feeds };
+    if (staleNames.length) {
+      out.warnings = [`stale feed data: ${staleNames.join(", ")} — run \`feeds update\`. ` +
+        `A stale urls list downgrades guard-bash from deny to ask on a malware-URL hit.`];
+    }
+    process.stdout.write(JSON.stringify(out, null, 2) + "\n");
     return 0;
   }
   if (cmd === "list") {

@@ -144,7 +144,18 @@ manifest); you do only the **judgment steps** the script can't.
    launched with `--allow-dangerously-skip-permissions` defaults into bypass without retyping the mode — but the CLAUDE.md
    note is what actually carries the convention, since the setting alone does not enable bypass. For *guarded*, no
    note is needed — Claude Code's own prompts are already the default; just confirm nothing else was written.
-6. **Seed memories** (judgment): `definition-of-done` (one line + pointer to the principles home — don't restate) +
+6. **Threat feeds** (judgment; *only if `guard-bash` was installed*): the feeds are machine-wide and opt-in, so
+   **check their state and offer them once, here** — otherwise `guard-bash` runs on its hardcoded shapes forever and
+   the feeds skill is a surface nobody reaches. Run `node <source>/scripts/feeds.js status` (read-only, no network):
+   - **`decision: "not asked"`** — make the opt-in ask from `/feeds-goodbehavior` verbatim: what gets fetched, in
+     plain language; **what a hit actually does** (a fresh verbatim malware-URL hit denies, Sigma and credential
+     shapes ask, credential shapes only audit in the fast lane); and that updates happen only when asked. **Run
+     `opt-in` only after they say yes, and record the answer either way** so it isn't re-asked every session.
+   - **`decision: "out"`** — say nothing further. A declined opt-in is an answer, not a prompt to re-litigate.
+   - **opted in with `warnings`** (stale data) — **surface the warning and offer `feeds update`.** Stale `urls` data
+     silently downgrades the guard from deny to ask, so an owner who thinks they're covered is not.
+   **Never run `opt-in` or `update` unasked.** Both reach the network and change machine-wide state.
+7. **Seed memories** (judgment): `definition-of-done` (one line + pointer to the principles home — don't restate) +
    `reporting-honesty` + the `project-profile` from step 3; start an empty `build-deploy-gotchas`.
 
 ## Report

@@ -3,9 +3,27 @@ name: feeds-goodbehavior
 description: Opt in/out of, update, and check the status of GoodBehaviorBiz's threat feeds — external, regularly-updated detection rules (Sigma command shapes, gitleaks secrets, URLhaus malicious URLs) that augment the guard's hardcoded shapes. Use when the user wants to enable/disable feeds, refresh them, or asks what they cover.
 ---
 
-Three opt-in, machine-wide detection feeds that `guard-bash.js`/`guard-injection.js` check in **monitor mode
-only**: a match is audited, and never blocks or asks. They augment the guard's hardcoded hard-shape/zone logic,
-which stays exactly as it is regardless of feed state.
+Three opt-in, machine-wide detection feeds that `guard-bash.js`/`guard-injection.js` check on every guarded
+command. They augment the guard's hardcoded hard-shape/zone logic, which stays exactly as it is regardless of
+feed state.
+
+## What a hit does — disposition tracks match precision, not the lane
+
+| feed | a hit means | guarded | fast |
+|---|---|---|---|
+| `urls` | the exact URL is on a live malware-distribution list | **deny** | **deny** |
+| `commands` | the command shape matches a known-malicious Sigma rule | **ask** | **ask** |
+| `secrets` | a credential-shaped string is in the command text | **ask** | **monitor** |
+
+**`urls` denies because a bad entry can only block commands containing that exact string** — bounded and
+recoverable via `rollback`. A bad regex can match everything, and once did, which is why `secrets` is the
+cautious one. **Blocking cannot un-leak a credential already in the command**, so for `secrets` the audit line
+is the real product. The lane is consulted only for `secrets`: the noisiest feed defers to it, the precise ones
+don't.
+
+**Stale data downgrades `urls` from deny to ask**, and the reason says so. A list of URLs *currently*
+distributing malware cannot back a block once it is weeks old. Budgets: `urls` 7 days, others 30.
+**Every deny and ask carries a plain-language reason naming the feed and rule id, never the matched text.**
 
 ## What each feed is, plainly (state this at ask time — **never let the user opt in blind**)
 
@@ -39,8 +57,9 @@ node <source>/scripts/feeds.js list
 ## Opt-in ask (do this before running `opt-in` on the user's behalf)
 
 State plainly, in one or two sentences: what gets fetched (the three feeds above, **in plain language, not just
-names**), that it's monitor-only (audited, never blocking, until the user explicitly asks for something stronger
-in a later phase), and that updates only happen when asked (`update`), not silently in the background. **Then run
+names**), **what a hit actually does** (the table above: a listed malware URL is blocked, a Sigma or credential
+match is held for their confirmation), and that updates only happen when asked (`update`), not silently in the
+background. **Then run
 `opt-in` only after they say yes. Never opt in without this ask**, even if the user seems to want it fast. It's
 a one-line command either way; the ask costs nothing and the alternative is a machine-wide state change the
 user didn't clearly agree to.
@@ -54,8 +73,9 @@ includes feed hits under the shape name `feed:<name>:<rule-id>`), not this skill
 
 ## Honesty
 
-**Monitor-only means a feed match never changes what the guard does. Say so** if asked "does this block X now."
-The feeds are also **best-effort translations, not the original tools running unmodified**: gitleaks regexes go
+**Be exact about what blocks.** Only a fresh `urls` hit denies; `commands` and `secrets` hold for confirmation,
+and `secrets` only audits in the fast lane. **Never say "the feeds block malware"** — they block one narrow,
+verbatim case. The feeds are also **best-effort translations, not the original tools running unmodified**: gitleaks regexes go
 through a Go-RE2-to-JS translation (a handful of rules using syntax JS can't represent are skipped, counted,
 **never silently dropped**), and Sigma rules needing process context this guard can't see (parent process, user,
 current directory) are skipped the same way. **`list`/`status` report real counts. Never round up or imply full
