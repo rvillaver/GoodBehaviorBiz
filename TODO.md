@@ -12,13 +12,17 @@ project fact), its generic form is distilled into `CLAUDE.md` / the relevant ski
 The self-update model (`/update-goodbehavior`, 3-way merge) is the carrier: a principle improved in one project's copy can
 flow upstream and back out to others.
 
-- [x] **Build the promotion path.** Extend `/learn-goodbehavior` (or add a step) to distinguish a *project fact* (stays
-      in project memory) from a *general discipline* (gets a generic rewrite proposed into `CLAUDE.md`/a skill). Ask
-      before editing principles; never auto-rewrite the persona.
-- [x] Decide how a project-local principle improvement travels back to the source repo (PR? a "contribute-up" note in
-      `/update`?), so good practice isn't trapped in one copy.
+## Open
 
-## Promoted into the loop (log)
+_Nothing open._ Settled work lives in the log below — it is not deleted, it just stops competing with live
+work for the top of the file. **Add new items here**; move them down with a date when they land.
+
+## Settled — promoted into the loop (log)
+
+Newest first. Each entry is kept whole: the reasoning that produced a rule is the durable part, and a
+summary of it would not survive contact with the next person asking "why is this rule here?"
+
+### Promotions distilled from real adoptions
 
 - **2026-07-08 — generalize beyond dev + shrink the trust surface** (from three non-dev adoption attempts — a
   presentation, a research project, data processing — where adopt balked with "not meant for this"). (1) **Profiles**:
@@ -46,7 +50,14 @@ flow upstream and back out to others.
   `/adopt-goodbehavior` Phase 1 (probe deploy/hosting config; analyze three facets) + Phase 2 (confirm the three facets
   separately; flag push=deploy; capture the verify URL).
 
-## Coverage gap: "report verified state, not intentions" (generic)
+### Promotion path built (settled)
+- [x] **Build the promotion path.** Extend `/learn-goodbehavior` (or add a step) to distinguish a *project fact* (stays
+      in project memory) from a *general discipline* (gets a generic rewrite proposed into `CLAUDE.md`/a skill). Ask
+      before editing principles; never auto-rewrite the persona.
+- [x] Decide how a project-local principle improvement travels back to the source repo (PR? a "contribute-up" note in
+      `/update`?), so good practice isn't trapped in one copy.
+
+### Coverage gap: "report verified state, not intentions" (generic)
 
 The bundle covers *basic* honesty (claim only what you can show; observe real behavior, not a green test; confirm you're
 on the current build; don't carry an unverified item forward). The sharper sub-points below were **promoted 2026-06-28**
@@ -70,7 +81,7 @@ promotion log above):
       long run is fine — keep executing; don't stop-the-world or ask "should I continue?" as a reflex. *(→ "Standing-
       proceed" in `CLAUDE.md` + `gate-build-`.)*
 
-## Carried-over open items (install/update thread, done 2026-06-23 — these remain)
+### Install/update thread (settled 2026-06-23; the round-trip items closed later, dates inline)
 
 - [x] **Initial commit of the source repo.** Done — the repo has been committed since 2026-06 (this item had gone
       stale; superseding it explicitly per the method's own rule).

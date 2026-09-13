@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 /*
  * Counts the six AI-register patterns, normalised per 1000 words, over any set of files or strings.
- * Patterns 2, 4 and 6 are regex PROXIES, not reliable detectors — they undercount paraphrased cases
- * and overcount legitimate ones. Treat them as a consistent yardstick applied identically to both
- * arms, not as ground truth.
+ * Patterns 2, 4 and 6 are regex PROXIES, not reliable detectors: they undercount paraphrased cases and
+ * overcount legitimate ones. Treat them as a consistent yardstick applied identically to two versions of
+ * one document, never as ground truth about one document on its own.
+ *
+ * `ruleOfThree` is the clearest case and worth stating so nobody "fixes" a document to satisfy it. It
+ * counts three-item constructions; it cannot tell a padded triple from a real closed list. A rules-dense
+ * doc scored 13 per 1000 words and every match was a genuine enumeration ("a genuine decision, a real
+ * failure, or an irreversible step"). The rule is "don't find a third item to complete the rhythm", NOT
+ * "never write three things" — editing real content to lower this number is the proxy-gaming the method
+ * exists to stop. Same for `aphorism`: bolding rules raises it by design.
  */
 "use strict";
 const fs = require("fs");
