@@ -24,10 +24,38 @@ const os = require("os");
 const SHELL_EXECS = new Set(["sh", "bash", "zsh", "ksh", "dash", "ash", "csh", "tcsh", "source"]);
 const NC_NAMES = new Set(["nc", "ncat", "netcat", "nc.traditional", "nc.openbsd"]);
 const WRITE_VERBS = new Set(["rm", "mv", "cp", "tee", "dd", "truncate", "ln", "touch", "mkdir", "rmdir", "chmod", "chown"]);
-// POSIX-only (Windows deferred — PRODUCTION-BACKLOG.md). Shared by the rm-shape check (Phase 1) and the
-// zone classifier (Phase 3) so the two never drift apart.
-const SYSTEM_PREFIXES = ["/etc", "/usr", "/bin", "/sbin", "/var", "/boot", "/System", "/Library", "/private", "/root"];
+// POSIX-only (Windows deferred — TODO.md "Open"). Shared by the rm-shape check (Phase 1) and the zone
+// classifier (Phase 3) so the two never drift apart. Deliberately the UNION across macOS and Linux rather
+// than a per-platform switch: a prefix that doesn't exist on this host can never match a real path, so the
+// union costs nothing and removes a whole class of "wrong on the other OS" bug.
+// Two categories are deliberately NOT here. The directories homes live in would reclassify every ordinary
+// home path as "system" and flood the severity channel — they are protected roots instead (PROTECTED_ROOTS).
+// Mount points (`/mnt`, `/media`, and the macOS equivalent) hold user data, not system files: home zone.
+const SYSTEM_PREFIXES = [
+  "/etc", "/usr", "/bin", "/sbin", "/var", "/boot", "/root",         // both
+  "/System", "/Library", "/private", "/Applications",                // macOS
+  "/opt", "/srv", "/lib", "/lib32", "/lib64", "/proc", "/sys", "/dev", // Linux (and /dev on both)
+];
 const HOME = os.homedir();
+// The roots a recursive force-delete must never be pointed at. DERIVED from os.homedir(), not listed as
+// literal tokens: an expanded home path and `~` name the same directory, and a guard that only knows the
+// second spelling is a guard you get past by expanding a tilde. The home's PARENT is in here too (the
+// directory homes live in) — deleting it takes every account on the box with it.
+const PROTECTED_ROOTS = (() => {
+  const out = new Set(["/"]);
+  for (const pre of SYSTEM_PREFIXES) out.add(pre);
+  const home = HOME ? path.posix.normalize(HOME).replace(/\/+$/, "") : "";
+  if (home.startsWith("/") && home !== "/") {
+    out.add(home);
+    const parent = path.posix.dirname(home);
+    if (parent !== "/" && parent !== home) out.add(parent);
+  }
+  return out;
+})();
+// Character devices are named like paths but aren't places on disk. Without this, adding "/dev" to
+// SYSTEM_PREFIXES would make every `2>/dev/null` report a SYSTEM-zone write — the most severe label the
+// ladder has, and the one that short-circuits the search for the command's real target.
+const DEV_STREAMS = /^\/dev\/(null|zero|full|tty|console|stdin|stdout|stderr|u?random|fd\/\d+)$/;
 // The OS temp dir commonly resolves UNDER a system prefix (macOS: os.tmpdir() -> /var/folders/... ->
 // realpath /private/var/folders/...), which collides with "/var"/"/private" in SYSTEM_PREFIXES. Checked
 // before the system-prefix test so temp-dir paths don't misclassify as "system" (BlitzPi's zones.ts has the
@@ -151,16 +179,22 @@ function hasExecFlag(args) {
   });
 }
 
-function isDangerousPath(tok) {
-  if (tok === "/") return true;
-  const t = tok.replace(/\/+$/, "");
-  if (t === "") return false;
-  const exact = new Set(["/", "~", "$HOME", "${HOME}", "/*"]);
-  if (exact.has(t)) return true;
-  return SYSTEM_PREFIXES.includes(t);
+/** Does this `rm` target name a protected root? Resolves the token FIRST — tilde, $HOME, the statement's cwd,
+ *  a trailing `/*` glob — and only then tests the result, so every spelling of the same directory gets the same
+ *  answer. Comparing raw tokens (the old shape) meant `rm -rf ~` denied while the expanded home path walked past.
+ *  A token still carrying an unexpanded `$VAR` is NOT treated as dangerous: its value is unknowable here, and
+ *  the zone ladder already handles it conservatively downstream. */
+function isDangerousPath(tok, cwd) {
+  if (typeof tok !== "string" || tok === "") return false;
+  // `rm -rf ~/*` empties the same directory `rm -rf ~` removes — test what the glob expands within.
+  const bare = /\/\*+$/.test(tok) ? tok.replace(/\/\*+$/, "/") : tok;
+  const r = resolveTarget(bare, cwd);
+  if (r.unresolved) return false;
+  const p = r.path.replace(/\/+$/, "") || "/";
+  return PROTECTED_ROOTS.has(p);
 }
 
-function isRecursiveForceDelete(args) {
+function isRecursiveForceDelete(args, cwd) {
   let hasR = false;
   let hasF = false;
   const targets = [];
@@ -174,7 +208,7 @@ function isRecursiveForceDelete(args) {
       targets.push(a);
     }
   }
-  return hasR && hasF && targets.some(isDangerousPath);
+  return hasR && hasF && targets.some((t) => isDangerousPath(t, cwd));
 }
 
 function stdoutDownload(cmd, args) {
@@ -198,14 +232,22 @@ function stdoutDownload(cmd, args) {
   return false;
 }
 
-function detectShape(command) {
+/** `startCwd` is the project root: hard shapes are cwd-aware because `cd ~ && rm -rf .` names a protected
+ *  root just as surely as naming the home directory outright does. Uses segmentsWithCwd (not splitStatements) for
+ *  that cwd, which also means `( … )` subshells are now split into their own statements rather than being
+ *  read as one word starting with "(" — so `(sudo rm)` and `(curl url) | sh` are seen, where before they
+ *  hid behind the paren. */
+function detectShape(command, startCwd) {
   if (!command || typeof command !== "string") return null;
   if (unquotedSubstringPresent(command, "/dev/tcp/") || unquotedSubstringPresent(command, "/dev/udp/")) {
     return "reverse-shell";
   }
-  const stmts = splitStatements(command);
+  const stmts = segmentsWithCwd(command, startCwd);
   let chainHasDownload = false;
-  for (const { sep, text } of stmts) {
+  for (const { sep, text, cwd } of stmts) {
+    // A paren boundary emits an empty statement. Skipping it before the pipe test keeps `(curl url) | sh`
+    // one chain instead of letting the blank segment reset it.
+    if (!text.trim()) continue;
     if (sep !== "|") chainHasDownload = false;
     const words = splitWords(text).map(unquote);
     const parsed = parseCommand(words);
@@ -213,7 +255,7 @@ function detectShape(command) {
     const { cmd, args } = parsed;
     if (cmd === "sudo" || cmd === "doas") return "sudo-doas";
     if (NC_NAMES.has(cmd) && hasExecFlag(args)) return "reverse-shell";
-    if (cmd === "rm" && isRecursiveForceDelete(args)) return "recursive-delete-protected-path";
+    if (cmd === "rm" && isRecursiveForceDelete(args, cwd)) return "recursive-delete-protected-path";
     if ((cmd === "curl" || cmd === "wget") && stdoutDownload(cmd, args)) {
       chainHasDownload = true;
     } else if (SHELL_EXECS.has(cmd) && chainHasDownload) {
@@ -249,7 +291,8 @@ function segmentsWithCwd(command, startCwd) {
     if (arg.startsWith("/")) { cwd = path.posix.normalize(arg); return; }
     cwd = path.posix.normalize(path.posix.join(cwd, arg));
   };
-  const push = () => { const text = cur; segs.push({ text, cwd }); cur = ""; applyCd(text); };
+  let sep = null;
+  const push = (nextSep) => { const text = cur; segs.push({ sep, text, cwd }); cur = ""; sep = nextSep; applyCd(text); };
   while (i < n) {
     const c = command[i];
     if (inS) { cur += c; if (c === "'") inS = false; i++; continue; }
@@ -260,14 +303,14 @@ function segmentsWithCwd(command, startCwd) {
     if (c === "'") { inS = true; cur += c; i++; continue; }
     if (c === '"') { inD = true; cur += c; i++; continue; }
     if (c === "\\" && i + 1 < n) { cur += c + command[i + 1]; i += 2; continue; }
-    if (c === "(") { push(); stack.push(cwd); i++; continue; }
-    if (c === ")") { push(); cwd = stack.length ? stack.pop() : cwd; i++; continue; }
-    if (c === "&" && command[i + 1] === "&") { push(); i += 2; continue; }
-    if (c === "|" && command[i + 1] === "|") { push(); i += 2; continue; }
-    if (c === ";" || c === "|" || c === "&" || c === "\n") { push(); i++; continue; }
+    if (c === "(") { push(null); stack.push(cwd); i++; continue; }
+    if (c === ")") { push(null); cwd = stack.length ? stack.pop() : cwd; i++; continue; }
+    if (c === "&" && command[i + 1] === "&") { push("&&"); i += 2; continue; }
+    if (c === "|" && command[i + 1] === "|") { push("||"); i += 2; continue; }
+    if (c === ";" || c === "|" || c === "&" || c === "\n") { push(c); i++; continue; }
     cur += c; i++;
   }
-  push();
+  push(null);
   return segs;
 }
 
@@ -370,7 +413,9 @@ function extractTargets(command, projectRootAbs) {
       }
     }
   }
-  return [...targets.entries()].map(([p, v]) => ({ path: p, write: v.write, unresolved: v.unresolved }));
+  return [...targets.entries()]
+    .filter(([p]) => !DEV_STREAMS.test(p))
+    .map(([p, v]) => ({ path: p, write: v.write, unresolved: v.unresolved }));
 }
 
 /** project / project-adjacent (sibling of the project root) / system / home (catch-all — the common case, and
@@ -620,7 +665,7 @@ function main(input) {
   const sessionId = input.session_id || null;
   const root = process.env.CLAUDE_PROJECT_DIR || cwd || process.cwd();
 
-  const shape = detectShape(command);
+  const shape = detectShape(command, root);
   if (shape) {
     writeAudit(cwd, { timestamp: new Date().toISOString(), tool: "Bash", shape, decision: "deny", session_id: sessionId });
     emitDeny(

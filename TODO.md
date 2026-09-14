@@ -14,13 +14,36 @@ flow upstream and back out to others.
 
 ## Open
 
-_Nothing open._ Settled work lives in the log below — it is not deleted, it just stops competing with live
-work for the top of the file. **Add new items here**; move them down with a date when they land.
+**Add new items here**; move them down with a date when they land. Settled work lives in the log below — it is
+not deleted, it just stops competing with live work for the top of the file.
+
+- **Windows is absent from the guard, not merely deferred** (surfaced 2026-09-14 alongside the
+  `isDangerousPath()` fix below). Backslash paths are never extracted as targets, `del`/`rmdir`/`Remove-Item`/
+  `format` are not verbs the guard knows, and DOS switches (`/f`, `/s`, `/q`) are misread as absolute POSIX
+  paths — so a recursive delete of a Windows home is **silently allowed** while the guard asks about `/f`.
+  Verified firsthand by running the hook. This is a design decision, not a patch: decide whether the guard
+  models a second path grammar, or declares POSIX-only and says so at install time. **Until it lands, the
+  guard must not be described as covering Windows.**
 
 ## Settled — promoted into the loop (log)
 
 Newest first. Each entry is kept whole: the reasoning that produced a rule is the durable part, and a
 summary of it would not survive contact with the next person asking "why is this rule here?"
+
+- **2026-09-14 — protected paths are resolved, not pattern-matched** (found by an adopter probing the guard:
+  `rm -rf ~` denied, the same directory spelled out did not). `isDangerousPath()` compared the raw token
+  against a literal set (`/`, `~`, `$HOME`, `${HOME}`, `/*`) plus `SYSTEM_PREFIXES`. Every spelling the list
+  didn't anticipate fell through to the zone ladder: guarded asked, the fast lane allowed-and-audited. The
+  rule this produced: **a guard that compares spellings is bypassed by respelling. Resolve to the thing, then
+  compare.** `isDangerousPath()` now runs the token through the existing `resolveTarget()` (tilde, `$HOME`,
+  statement cwd, trailing `/*` glob) and tests the result against `PROTECTED_ROOTS`, a set DERIVED from
+  `os.homedir()` — so the home directory and the directory homes live in are protected on every platform
+  without naming either. Four gaps closed with it: the expanded home path on macOS and Linux; the home's
+  parent; `~/*` and its expanded twin; and `cd <protected> && rm -rf .`, which needed `detectShape()` to
+  become cwd-aware. Making it cwd-aware meant moving it off `splitStatements` onto `segmentsWithCwd`, which
+  also splits `( … )` — so `(sudo …)` and `(curl url) | sh`, both previously invisible behind the paren, are
+  now seen. `SYSTEM_PREFIXES` was a macOS-shaped list; it is now the union across macOS and Linux, which
+  required exempting the `/dev` character devices so `2>/dev/null` doesn't report a system-zone write.
 
 ### Promotions distilled from real adoptions
 
