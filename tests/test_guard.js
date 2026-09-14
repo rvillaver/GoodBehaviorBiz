@@ -271,6 +271,19 @@ function main() {
       `decision=${decision} audit=${JSON.stringify(auditLines)}`);
   }
 
+  // fail-closed at LOAD time. Only main() used to be wrapped, so a throw at module scope crashed the process
+  // before the stdin handler existed: no output, no audit, and the command ran. This is the regression test
+  // for that — a guard that cannot finish loading must deny, not disappear.
+  {
+    // A command that would otherwise be ALLOWED, so the deny can only come from the load failure itself.
+    const { decision, reason, auditLines } = runHook("echo fine", { env: { GUARD_BASH_TEST_FORCE_LOAD_THROW: "1" } });
+    const audited = auditLines.find((l) => l.decision === "deny" && l.shape === "guard-error:load-failure");
+    check("forced load-time throw -> deny (fail closed, not silent)", decision === "deny",
+      `decision=${decision} reason=${reason}`);
+    check("forced load-time throw -> audited as load-failure", Boolean(audited),
+      `audit=${JSON.stringify(auditLines)}`);
+  }
+
   // Threat feeds (opt-in). Disposition tracks MATCH PRECISION, not the lane: urls deny (exact match, bounded
   // blast radius), commands ask, secrets ask in guarded / monitor in fast. Stale data downgrades deny -> ask.
   // A small hand-built fixture feeds dir, not live network data — kept fast and deterministic.

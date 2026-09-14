@@ -7,8 +7,8 @@
  * is the first line. This hook adds only what native can't do — a blocklist scan that still fires
  * under bypassPermissions, since hooks run regardless of permission mode.
  *
- * Fail CLOSED (opposite of done-gate, which fails open on purpose): malformed stdin, or any error
- * anywhere in the decision path, denies the command. The audit entry is written before the decision
+ * Fail CLOSED (opposite of done-gate, which fails open on purpose): malformed stdin, any error anywhere in
+ * the decision path, or a fault that stops this file from finishing LOAD, all deny the command. The audit entry is written before the decision
  * is returned. Deny reasons never echo the raw matched command text (redaction discipline for the
  * future injection layer) — only the named shape.
  *
@@ -21,6 +21,42 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
+// Registered BEFORE any other work in this file, and deliberately self-contained: it must stay correct even
+// when the code below it never finished loading. Only main() used to be wrapped in try/catch, so a throw at
+// module scope — a `const` read before its own declaration was the real case — crashed the process before the
+// stdin handler was registered: nothing on stdout, nothing audited, and EVERY COMMAND ALLOWED. That is the
+// wrong failure mode for a blocklist. This handler closes the window that the try/catch around main() can't
+// reach; a load-time fault now denies like every other fault in the decision path.
+process.on("uncaughtException", (err) => {
+  try {
+    const base = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const dir = path.join(base, ".claude", "goodbehavior", "audit");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, new Date().toISOString().slice(0, 10) + ".jsonl"),
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        tool: "Bash",
+        shape: "guard-error:load-failure",
+        decision: "deny",
+        session_id: null,
+      }) + "\n");
+  } catch (e) { /* best effort — an audit failure must not stop the deny from being emitted */ }
+  try {
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason:
+          "GoodBehavior guard-bash: failing closed (load-failure) — the guard could not finish loading, so it " +
+          "cannot evaluate this command and denies it. Reason: " + String((err && err.message) || err),
+      },
+    }));
+  } catch (e) { /* noop */ }
+  process.exit(0);
+});
+
+if (process.env.GUARD_BASH_TEST_FORCE_LOAD_THROW) throw new Error("forced test load throw");
+
 // The tools this hook decides for. Both carry the command in `tool_input.command`.
 const GUARDED_TOOLS = new Set(["Bash", "PowerShell"]);
 const SHELL_EXECS = new Set(["sh", "bash", "zsh", "ksh", "dash", "ash", "csh", "tcsh", "source"]);
@@ -31,7 +67,7 @@ const WRITE_VERBS = new Set(["rm", "mv", "cp", "tee", "dd", "truncate", "ln", "t
 // than a per-platform switch: a prefix that doesn't exist on this host can never match a real path, so the
 // union costs nothing and removes a whole class of "wrong on the other OS" bug.
 // Two categories are deliberately NOT here. The directories homes live in would reclassify every ordinary
-// home path as "system" and flood the severity channel — they are protected roots instead (PROTECTED_ROOTS).
+// home path as "system" and flood the severity channel — they are protected roots instead (protectedRoots()).
 // Mount points (`/mnt`, `/media`, and the macOS equivalent) hold user data, not system files: home zone.
 const SYSTEM_PREFIXES = [
   "/etc", "/usr", "/bin", "/sbin", "/var", "/boot", "/root",         // both
@@ -67,25 +103,35 @@ const WIN_PROTECTED_RE = /^\/[a-z]\/?$|^\/[a-z]\/users(\/[^/]+)?$|^\/[a-z]\/(win
 const WIN_SYSTEM_PREFIX_RE = /^\/[a-z]\/(windows|program files( \(x86\))?|programdata)(\/|$)/i;
 
 const HOME = os.homedir();
-// HOME in canonical form, for PATH MATH only. `HOME` itself stays native because feedsDir() builds real
-// filesystem paths from it, and on Windows those need the backslashes. Declared before PROTECTED_ROOTS,
-// which derives from it — a `const` read from an earlier line is a load-time crash, not a late error.
-const HOME_CANON = toCanonicalPath(HOME || "");
+// Everything DERIVED is computed lazily and memoized, never at module scope. Module-scope work that throws
+// takes the whole file down before the decision path exists; the same work behind an accessor throws inside
+// main()'s try/catch instead, where it denies WITH a properly attributed audit line (cwd, session, tool). The
+// uncaughtException handler above is the backstop for whatever still escapes, not the first line of defence.
+let _homeCanon = null;
+/** HOME in canonical form, for PATH MATH only. `HOME` itself stays native because feedsDir() builds real
+ *  filesystem paths from it, and on Windows those need the backslashes. */
+function homeCanon() {
+  if (_homeCanon === null) _homeCanon = toCanonicalPath(HOME || "");
+  return _homeCanon;
+}
 // The roots a recursive force-delete must never be pointed at. DERIVED from os.homedir(), not listed as
 // literal tokens: an expanded home path and `~` name the same directory, and a guard that only knows the
 // second spelling is a guard you get past by expanding a tilde. The home's PARENT is in here too (the
 // directory homes live in) — deleting it takes every account on the box with it.
-const PROTECTED_ROOTS = (() => {
+let _protectedRoots = null;
+function protectedRoots() {
+  if (_protectedRoots) return _protectedRoots;
   const out = new Set(["/"]);
   for (const pre of SYSTEM_PREFIXES) out.add(pre);
-  const home = HOME_CANON ? path.posix.normalize(HOME_CANON).replace(/\/+$/, "") : "";
+  const home = homeCanon() ? path.posix.normalize(homeCanon()).replace(/\/+$/, "") : "";
   if (home.startsWith("/") && home !== "/") {
     out.add(home);
     const parent = path.posix.dirname(home);
     if (parent !== "/" && parent !== home) out.add(parent);
   }
+  _protectedRoots = out;
   return out;
-})();
+}
 // Character devices are named like paths but aren't places on disk. Without this, adding "/dev" to
 // SYSTEM_PREFIXES would make every `2>/dev/null` report a SYSTEM-zone write — the most severe label the
 // ladder has, and the one that short-circuits the search for the command's real target.
@@ -94,14 +140,17 @@ const DEV_STREAMS = /^\/dev\/(null|zero|full|tty|console|stdin|stdout|stderr|u?r
 // realpath /private/var/folders/...), which collides with "/var"/"/private" in SYSTEM_PREFIXES. Checked
 // before the system-prefix test so temp-dir paths don't misclassify as "system" (BlitzPi's zones.ts has the
 // exact same collision and resolves it the same way — scratch checked first).
-const SCRATCH_DIRS = (() => {
+let _scratchDirs = null;
+function scratchDirs() {
+  if (_scratchDirs) return _scratchDirs;
   const out = new Set();
   for (const d of [os.tmpdir(), "/tmp"]) {
     out.add(path.posix.normalize(d));
     try { out.add(fs.realpathSync(d)); } catch (e) { /* absent on this platform */ }
   }
-  return [...out];
-})();
+  _scratchDirs = [...out];
+  return _scratchDirs;
+}
 // An unexpanded expansion in a path — can't be known, treat conservatively. Covers POSIX `$VAR`/backtick and
 // the cmd/PowerShell `%VAR%` form, so a Windows path is never guessed into looking safe either.
 const UNRESOLVED_EXPANSION = /[$`]|%[A-Za-z_][A-Za-z0-9_()]*%/;
@@ -109,7 +158,7 @@ const UNRESOLVED_EXPANSION = /[$`]|%[A-Za-z_][A-Za-z0-9_()]*%/;
 
 /** Exact roots a recursive force-delete must never name, in either grammar. */
 function isProtectedRoot(p) {
-  return PROTECTED_ROOTS.has(p) || WIN_PROTECTED_RE.test(p);
+  return protectedRoots().has(p) || WIN_PROTECTED_RE.test(p);
 }
 
 // ---- command parsing (quote-aware, just enough to avoid tripping on quoted strings) ----
@@ -309,7 +358,7 @@ function detectShape(command, startCwd) {
 
 // ---- PowerShell dialect: on Windows the PowerShell tool is the PRIMARY shell, and it is a SEPARATE tool
 // from Bash with its own tool_name. The hook subscribes to both; everything below is the second grammar.
-// Shared with the POSIX lane: path canonicalization, PROTECTED_ROOTS, the zone ladder, the audit, the feeds.
+// Shared with the POSIX lane: path canonicalization, the protected roots, the zone ladder, the audit, the feeds.
 // Different here: the verbs, the switch syntax, and the download-to-execute idiom. ----
 
 const PS_DELETE_VERBS = new Set(["remove-item", "ri", "rd", "rmdir", "del", "erase", "rm"]);
@@ -432,8 +481,8 @@ function segmentsWithCwd(command, startCwd) {
     const arg = rest.length ? rest[0] : "~"; // bare `cd` goes home
     if (arg === "-" || UNRESOLVED_EXPANSION.test(arg)) return; // `cd -` / `cd "$var"` — can't know, leave cwd as-is
     const a = toCanonicalPath(arg);
-    if (a === "~" || a === "~/") { cwd = HOME_CANON; return; }
-    if (a.startsWith("~/")) { cwd = path.posix.join(HOME_CANON, a.slice(2)); return; }
+    if (a === "~" || a === "~/") { cwd = homeCanon(); return; }
+    if (a.startsWith("~/")) { cwd = path.posix.join(homeCanon(), a.slice(2)); return; }
     if (a.startsWith("/")) { cwd = path.posix.normalize(a); return; }
     cwd = path.posix.normalize(path.posix.join(cwd, a));
   };
@@ -465,13 +514,13 @@ function segmentsWithCwd(command, startCwd) {
  *  is returned as-is with unresolved:true — never guessed into looking safe. */
 function resolveTarget(raw, cwd) {
   let t = toCanonicalPath(raw);
-  if (t === "~" || t === "~/") t = HOME_CANON;
-  else if (t.startsWith("~/")) t = path.posix.join(HOME_CANON, t.slice(2));
+  if (t === "~" || t === "~/") t = homeCanon();
+  else if (t.startsWith("~/")) t = path.posix.join(homeCanon(), t.slice(2));
   else {
     // $HOME / ${HOME} (POSIX and Git Bash), %USERPROFILE% (cmd), $env:USERPROFILE (PowerShell) — the same
     // directory under four names. `~` is also what Git Bash reports for the Windows profile.
     const m = /^(?:\$\{HOME\}|\$HOME|%USERPROFILE%|\$env:USERPROFILE)(?=$|[\/])/i.exec(t);
-    if (m) t = path.posix.join(HOME_CANON, toCanonicalPath(t.slice(m[0].length)).replace(/^\//, ""));
+    if (m) t = path.posix.join(homeCanon(), toCanonicalPath(t.slice(m[0].length)).replace(/^\//, ""));
   }
   if (UNRESOLVED_EXPANSION.test(t)) return { path: t, unresolved: true };
   if (t.startsWith("/")) return { path: path.posix.normalize(t), unresolved: false };
@@ -572,7 +621,7 @@ function classifyZone(absPath, projectRootAbs) {
   const p = path.posix.normalize(absPath);
   const under = (root) => p === root || p.startsWith(root + "/");
   if (under(projectRootAbs)) return "project";
-  if (SCRATCH_DIRS.some(under)) return "home"; // temp-dir space is not system-owned — see SCRATCH_DIRS comment
+  if (scratchDirs().some(under)) return "home"; // temp-dir space is not system-owned — see scratchDirs()
   if (SYSTEM_PREFIXES.some((pre) => p === pre || p.startsWith(pre + "/"))) return "system";
   if (WIN_SYSTEM_PREFIX_RE.test(p)) return "system";
   const parent = path.posix.dirname(projectRootAbs);

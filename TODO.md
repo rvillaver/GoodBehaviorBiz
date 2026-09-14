@@ -17,21 +17,28 @@ flow upstream and back out to others.
 **Add new items here**; move them down with a date when they land. Settled work lives in the log below — it is
 not deleted, it just stops competing with live work for the top of the file.
 
-- **The guard fails OPEN on a module-load error** (found 2026-09-14 while building the Windows lane; verified
-  firsthand twice). `guard-bash.js` wraps only `main()` in try/catch, so a throw at module scope — a
-  `const` read before its declaration was the real case — crashes the process before the stdin handler is
-  registered. Nothing is written to stdout, nothing is audited, and **every command is allowed**. I watched
-  68 of 75 deny cases silently pass while the hook was crashing. This directly contradicts the file's own
-  header ("any error anywhere in the decision path denies the command"). Fix: move the derived module
-  constants (`SCRATCH_DIRS`, `PROTECTED_ROOTS`, `HOME_CANON`) behind memoized accessors so their evaluation
-  happens inside `main()`'s try/catch, and add a test that a hook which throws at load still denies. Not
-  attacker-triggerable — it needs a bug in the file — but a security tool whose failure mode is "allow
-  everything, silently" is the wrong failure mode.
+_Nothing open._
 
 ## Settled — promoted into the loop (log)
 
 Newest first. Each entry is kept whole: the reasoning that produced a rule is the durable part, and a
 summary of it would not survive contact with the next person asking "why is this rule here?"
+
+- **2026-09-14 — the guard failed OPEN on a load error; a blocklist must fail closed even when it is the
+  broken thing** (surfaced twice while building the Windows lane, both times a `const` read before its own
+  declaration). Only `main()` was wrapped in try/catch, so a throw at module scope crashed the process before
+  the stdin handler was registered: no stdout, no audit, and the command ran. I watched 68 of 75 deny cases
+  silently pass while the hook was crashing, and confirmed it by injecting the bug into the shipped file —
+  the pre-fix hook emitted nothing and exited 1 on `rm -rf /`. The file's own header had promised the
+  opposite ("any error anywhere in the decision path denies the command"), which is how it went unnoticed:
+  **a stated invariant is not a tested one.**
+  Two layers landed. (1) A `process.on("uncaughtException")` handler registered as the first statement after
+  the requires, self-contained so it stays correct when the code below it never finished loading — verified
+  that Node routes a module-scope throw, TDZ included, to such a handler. (2) Every derived constant
+  (`homeCanon()`, `protectedRoots()`, `scratchDirs()`) is now a memoized accessor rather than module-scope
+  work, so the realistic faults happen inside `main()`'s try/catch and deny with a properly attributed audit
+  line instead of the backstop's anonymous one. The regression test runs a command that would otherwise be
+  ALLOWED, so the deny can only come from the load failure.
 
 - **2026-09-14 — Windows: the guard was subscribed to the wrong surface** (found by probing after the
   protected-path fix below). The first framing was wrong in an instructive way: "the guard doesn't know
