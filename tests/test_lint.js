@@ -94,8 +94,12 @@ function main() {
     const m = JSON.parse(read("templates/managed-settings.json"));
     check("managed-settings.json: allowManagedHooksOnly is true", m.allowManagedHooksOnly === true);
     check("managed-settings.json: disableBypassPermissionsMode is set", m.permissions?.disableBypassPermissionsMode === "disable");
-    check("managed-settings.json: wires guard-bash under PreToolUse/Bash",
-      (m.hooks?.PreToolUse || []).some((e) => e.matcher === "Bash" && (e.hooks || []).some((h) => (h.command || "").includes("guard-bash"))));
+    check("managed-settings.json: wires guard-bash under PreToolUse for Bash AND PowerShell",
+      (m.hooks?.PreToolUse || []).some((e) => {
+        const tools = String(e.matcher || "").split("|");
+        return tools.includes("Bash") && tools.includes("PowerShell") &&
+          (e.hooks || []).some((h) => (h.command || "").includes("guard-bash"));
+      }));
     check("managed-settings.json: wires guard-injection under UserPromptSubmit and PostToolUse",
       (m.hooks?.UserPromptSubmit || []).some((e) => (e.hooks || []).some((h) => (h.command || "").includes("guard-injection"))) &&
       (m.hooks?.PostToolUse || []).some((e) => e.matcher === "Read|WebFetch" && (e.hooks || []).some((h) => (h.command || "").includes("guard-injection"))));

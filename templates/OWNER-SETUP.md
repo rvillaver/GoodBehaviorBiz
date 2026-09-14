@@ -55,7 +55,14 @@ From any project on the machine (even one with no `.claude/` at all):
 claude -p --dangerously-skip-permissions "Run exactly this using the Bash tool and then stop: sudo id"
 ```
 
-Expect the `sudo id` call to be blocked (the hook denies it outright) even though `--dangerously-skip-permissions`
+On native Windows the PowerShell tool is the primary shell, so verify that surface too — it is a separate
+`tool_name`, and a matcher covering only `Bash` would leave it unguarded:
+
+```sh
+claude -p --dangerously-skip-permissions "Run exactly this using the PowerShell tool and then stop: Start-Process -Verb RunAs cmd"
+```
+
+Expect the call to be blocked (the hook denies it outright) even though `--dangerously-skip-permissions`
 was passed — confirming both the hook can't be shed and bypass mode can't actually engage. Check the audit trail
 at `.claude/goodbehavior/audit/<date>.jsonl` **inside whichever project you ran that in** — the guard still
 resolves the project root from `$CLAUDE_PROJECT_DIR`/cwd exactly as it does under a normal project install, only

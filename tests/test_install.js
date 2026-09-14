@@ -164,8 +164,14 @@ function main() {
     check("user's own hook preserved", "PostToolUse" in settings.hooks);
     check("Stop hook wired exactly once", countWired(settings.hooks.Stop, "done-gate") === 1);
     check("PreToolUse/Bash guard wired exactly once", countWired(settings.hooks.PreToolUse, "guard-bash") === 1);
-    check("guard-bash entry carries the Bash matcher",
-      (settings.hooks.PreToolUse || []).some((e) => (e.hooks || []).some((h) => (h.command || "").includes("guard-bash")) && e.matcher === "Bash"));
+    // BOTH command surfaces: on native Windows the PowerShell tool is the primary shell, and a Bash-only
+    // matcher leaves it unguarded entirely.
+    check("guard-bash entry matches both Bash and PowerShell",
+      (settings.hooks.PreToolUse || []).some((e) => {
+        const tools = String(e.matcher || "").split("|");
+        return (e.hooks || []).some((h) => (h.command || "").includes("guard-bash")) &&
+          tools.includes("Bash") && tools.includes("PowerShell");
+      }));
 
     // idempotency: re-run must create nothing new and not double-wire
     const report2 = runInstall(planPath);

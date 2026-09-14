@@ -37,7 +37,7 @@ const HOOKS = {
   "guard-bash": {
     rel: ".claude/hooks/guard-bash.js",
     event: "PreToolUse",
-    matcher: "Bash",
+    matcher: "Bash|PowerShell",
     command: 'node "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-bash.js"',
   },
   // guard-injection is ONE file wired under TWO events (different input/output shapes per event, so it

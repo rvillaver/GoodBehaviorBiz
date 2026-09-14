@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * GoodBehavior guard-bash — a PreToolUse hook (matcher: Bash) that denies a small set of hard-shape
+ * GoodBehavior guard-bash — a PreToolUse hook (matcher: Bash and PowerShell) that denies a small set of hard-shape
  * commands outright, and audits every decision (allow and deny) it makes.
  *
  * This is the fast-lane net: Claude Code's own permission system (rules, sandbox, managed settings)
@@ -21,10 +21,12 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
+// The tools this hook decides for. Both carry the command in `tool_input.command`.
+const GUARDED_TOOLS = new Set(["Bash", "PowerShell"]);
 const SHELL_EXECS = new Set(["sh", "bash", "zsh", "ksh", "dash", "ash", "csh", "tcsh", "source"]);
 const NC_NAMES = new Set(["nc", "ncat", "netcat", "nc.traditional", "nc.openbsd"]);
 const WRITE_VERBS = new Set(["rm", "mv", "cp", "tee", "dd", "truncate", "ln", "touch", "mkdir", "rmdir", "chmod", "chown"]);
-// POSIX-only (Windows deferred — TODO.md "Open"). Shared by the rm-shape check (Phase 1) and the zone
+// The POSIX system roots. Windows has its own (WIN_SYSTEM_PREFIX_RE). Shared by the rm-shape check and the zone
 // classifier (Phase 3) so the two never drift apart. Deliberately the UNION across macOS and Linux rather
 // than a per-platform switch: a prefix that doesn't exist on this host can never match a real path, so the
 // union costs nothing and removes a whole class of "wrong on the other OS" bug.
@@ -36,7 +38,39 @@ const SYSTEM_PREFIXES = [
   "/System", "/Library", "/private", "/Applications",                // macOS
   "/opt", "/srv", "/lib", "/lib32", "/lib64", "/proc", "/sys", "/dev", // Linux (and /dev on both)
 ];
+// ---- path dialects: one directory, several spellings, and on Windows they cross grammars ----
+
+const WIN_DRIVE_RE = /^([A-Za-z]):[\\/]/;   // C:\… or C:/…
+const WIN_DRIVE_BARE_RE = /^([A-Za-z]):$/;  // C:
+const UNC_RE = /^\\\\[^\\]/;              // \\server\share
+
+/** Canonical form is POSIX with an MSYS-style drive prefix: a drive-letter path, its forward-slash variant,
+ *  and the Git Bash `/c/...` form all become one string, so ONE protected-root set and ONE zone ladder serve
+ *  both grammars. Conversion is
+ *  conditional on the token actually looking Windows-shaped — a blanket backslash swap would corrupt POSIX
+ *  paths where `\` is an escape (`/tmp/my\ dir`). Anything else passes through untouched. */
+function toCanonicalPath(raw) {
+  if (typeof raw !== "string" || raw === "") return raw;
+  const drive = WIN_DRIVE_RE.exec(raw);
+  if (drive) return "/" + drive[1].toLowerCase() + raw.slice(2).replace(/\\/g, "/");
+  const bare = WIN_DRIVE_BARE_RE.exec(raw);
+  if (bare) return "/" + bare[1].toLowerCase();
+  if (UNC_RE.test(raw)) return raw.replace(/\\/g, "/");
+  return raw;
+}
+
+// Windows protected roots, drive-letter agnostic so they hold whichever volume the system lives on: a whole
+// drive (`/c`), the directory user profiles live in (`/c/Users`), any single profile under it, and the system
+// directories. Written as patterns rather than derived from os.homedir() so the Windows rules are testable
+// from a POSIX host too — a `/c/...` path can't collide with a real POSIX one in practice.
+const WIN_PROTECTED_RE = /^\/[a-z]\/?$|^\/[a-z]\/users(\/[^/]+)?$|^\/[a-z]\/(windows|program files( \(x86\))?|programdata)$/i;
+const WIN_SYSTEM_PREFIX_RE = /^\/[a-z]\/(windows|program files( \(x86\))?|programdata)(\/|$)/i;
+
 const HOME = os.homedir();
+// HOME in canonical form, for PATH MATH only. `HOME` itself stays native because feedsDir() builds real
+// filesystem paths from it, and on Windows those need the backslashes. Declared before PROTECTED_ROOTS,
+// which derives from it — a `const` read from an earlier line is a load-time crash, not a late error.
+const HOME_CANON = toCanonicalPath(HOME || "");
 // The roots a recursive force-delete must never be pointed at. DERIVED from os.homedir(), not listed as
 // literal tokens: an expanded home path and `~` name the same directory, and a guard that only knows the
 // second spelling is a guard you get past by expanding a tilde. The home's PARENT is in here too (the
@@ -44,7 +78,7 @@ const HOME = os.homedir();
 const PROTECTED_ROOTS = (() => {
   const out = new Set(["/"]);
   for (const pre of SYSTEM_PREFIXES) out.add(pre);
-  const home = HOME ? path.posix.normalize(HOME).replace(/\/+$/, "") : "";
+  const home = HOME_CANON ? path.posix.normalize(HOME_CANON).replace(/\/+$/, "") : "";
   if (home.startsWith("/") && home !== "/") {
     out.add(home);
     const parent = path.posix.dirname(home);
@@ -68,7 +102,15 @@ const SCRATCH_DIRS = (() => {
   }
   return [...out];
 })();
-const UNRESOLVED_EXPANSION = /[$`]/; // an unexpanded shell expansion in a path — can't be known, treat conservatively
+// An unexpanded expansion in a path — can't be known, treat conservatively. Covers POSIX `$VAR`/backtick and
+// the cmd/PowerShell `%VAR%` form, so a Windows path is never guessed into looking safe either.
+const UNRESOLVED_EXPANSION = /[$`]|%[A-Za-z_][A-Za-z0-9_()]*%/;
+
+
+/** Exact roots a recursive force-delete must never name, in either grammar. */
+function isProtectedRoot(p) {
+  return PROTECTED_ROOTS.has(p) || WIN_PROTECTED_RE.test(p);
+}
 
 // ---- command parsing (quote-aware, just enough to avoid tripping on quoted strings) ----
 
@@ -191,7 +233,7 @@ function isDangerousPath(tok, cwd) {
   const r = resolveTarget(bare, cwd);
   if (r.unresolved) return false;
   const p = r.path.replace(/\/+$/, "") || "/";
-  return PROTECTED_ROOTS.has(p);
+  return isProtectedRoot(p);
 }
 
 function isRecursiveForceDelete(args, cwd) {
@@ -265,6 +307,109 @@ function detectShape(command, startCwd) {
   return null;
 }
 
+// ---- PowerShell dialect: on Windows the PowerShell tool is the PRIMARY shell, and it is a SEPARATE tool
+// from Bash with its own tool_name. The hook subscribes to both; everything below is the second grammar.
+// Shared with the POSIX lane: path canonicalization, PROTECTED_ROOTS, the zone ladder, the audit, the feeds.
+// Different here: the verbs, the switch syntax, and the download-to-execute idiom. ----
+
+const PS_DELETE_VERBS = new Set(["remove-item", "ri", "rd", "rmdir", "del", "erase", "rm"]);
+const PS_DOWNLOADERS = new Set(["invoke-webrequest", "iwr", "invoke-restmethod", "irm", "curl", "wget"]);
+const PS_EXECS = new Set(["iex", "invoke-expression"]);
+const PS_CD_VERBS = new Set(["cd", "chdir", "set-location", "sl", "pushd"]);
+const PS_WRITE_VERBS = new Set([
+  ...PS_DELETE_VERBS,
+  "new-item", "ni", "set-content", "sc", "add-content", "ac", "out-file", "clear-content",
+  "copy-item", "cpi", "copy", "cp", "move-item", "mi", "move", "mv", "mkdir", "md", "xcopy", "robocopy",
+]);
+// The PowerShell reverse shell, the counterpart of the bash /dev/tcp one-liner.
+const PS_REVERSE_SHELL_RE = /net\.sockets\.tcp(client|listener)/i;
+
+/** A cmd-style switch (`/s`, `/q`, `/f`) — NOT a path. Reading these as absolute POSIX paths is what made the
+ *  guard ask about "/f" while the command's real target walked past unexamined. */
+function isCmdSwitch(tok) {
+  return /^\/[A-Za-z?][A-Za-z0-9?:-]*$/.test(tok);
+}
+
+/** Recursive+forced delete in either Windows grammar: PowerShell's `-Recurse -Force` (accepting the unambiguous
+ *  prefixes PowerShell itself accepts), or cmd's `/s`, which recurses and suppresses the prompt in one switch. */
+function psIsRecursiveForceDelete(args, cwd) {
+  let recurse = false;
+  let force = false;
+  const targets = [];
+  for (const a of args) {
+    if (a.startsWith("-")) {
+      if (/^-r(e(c(u(r(s(e)?)?)?)?)?)?$/i.test(a)) recurse = true;
+      else if (/^-f(o(r(c(e)?)?)?)?$/i.test(a)) force = true;
+      continue;
+    }
+    if (isCmdSwitch(a)) {
+      if (/^\/s$/i.test(a)) { recurse = true; force = true; }
+      continue;
+    }
+    targets.push(a);
+  }
+  return recurse && force && targets.some((t) => isDangerousPath(t, cwd));
+}
+
+function detectShapePowerShell(command, startCwd) {
+  if (!command || typeof command !== "string") return null;
+  if (PS_REVERSE_SHELL_RE.test(maskQuoted(command))) return "reverse-shell";
+  let chainHasDownload = false;
+  for (const { sep, text, cwd } of segmentsWithCwd(command, startCwd)) {
+    if (!text.trim()) continue;
+    if (sep !== "|") chainHasDownload = false;
+    const parsed = parseCommand(splitWords(text).map(unquote));
+    if (!parsed) continue;
+    const cmd = parsed.cmd.toLowerCase().replace(/\.exe$/, "");
+    const args = parsed.args;
+    if (cmd === "sudo" || cmd === "doas") return "sudo-doas";
+    // Start-Process -Verb RunAs is the UAC elevation prompt: the Windows counterpart of sudo.
+    if (cmd === "start-process" && args.some((a, i) => /^-verb$/i.test(a) && /^runas$/i.test(args[i + 1] || ""))) {
+      return "elevated-execution";
+    }
+    if (PS_DELETE_VERBS.has(cmd) && psIsRecursiveForceDelete(args, cwd)) return "recursive-delete-protected-path";
+    if (cmd === "format-volume" || (cmd === "format" && args.some((a) => WIN_DRIVE_BARE_RE.test(a)))) {
+      return "format-volume";
+    }
+    if (PS_DOWNLOADERS.has(cmd)) chainHasDownload = true;
+    else if (PS_EXECS.has(cmd) && chainHasDownload) return "download-piped-to-shell";
+  }
+  return null;
+}
+
+/** Does this token name a place on disk, in the Windows grammars? Switches are the thing to exclude: cmd's
+ *  start with `/` and would otherwise read as absolute POSIX paths, PowerShell's start with `-`. */
+function looksLikePath(tok) {
+  if (!tok || tok.startsWith("-") || isCmdSwitch(tok)) return false;
+  if (WIN_DRIVE_RE.test(tok) || WIN_DRIVE_BARE_RE.test(tok) || UNC_RE.test(tok)) return true;
+  if (tok.startsWith("~") || tok.startsWith("/")) return true;
+  if (tok.includes("../") || tok.includes("..\\")) return true;
+  return /^(?:\$\{?HOME\}?|%USERPROFILE%|\$env:USERPROFILE)/i.test(tok);
+}
+
+function extractTargetsPowerShell(command, projectRootAbs) {
+  const stripped = command.replace(URL_RE, (u) => " ".repeat(u.length));
+  const targets = new Map();
+  for (const { text, cwd } of segmentsWithCwd(stripped, projectRootAbs)) {
+    if (!text.trim()) continue;
+    const parsed = parseCommand(splitWords(text).map(unquote));
+    if (!parsed) continue;
+    const cmd = parsed.cmd.toLowerCase().replace(/\.exe$/, "");
+    if (PS_CD_VERBS.has(cmd)) continue; // navigation is not a touch — same rule the POSIX lane applies to `cd`
+    const write = PS_WRITE_VERBS.has(cmd);
+    const outside = cwd !== projectRootAbs; // a relative arg counts once the statement has moved out of the project
+    for (const tok of parsed.args) {
+      if (!looksLikePath(tok) && !(write && outside && !tok.startsWith("-") && !isCmdSwitch(tok))) continue;
+      const r = resolveTarget(tok, cwd);
+      const prev = targets.get(r.path);
+      targets.set(r.path, { write: (prev && prev.write) || write, unresolved: r.unresolved });
+    }
+  }
+  return [...targets.entries()]
+    .filter(([p]) => !DEV_STREAMS.test(p))
+    .map(([p, v]) => ({ path: p, write: v.write, unresolved: v.unresolved }));
+}
+
 // ---- zones and targets (Phase 3): what does this command touch, once it's past the hard-shape check? ----
 
 /** Splits on the same operators as splitStatements, PLUS `( … )` subshell scoping for cwd (a `cd` inside
@@ -286,10 +431,11 @@ function segmentsWithCwd(command, startCwd) {
     const rest = parsed.args.filter((a) => a !== "--");
     const arg = rest.length ? rest[0] : "~"; // bare `cd` goes home
     if (arg === "-" || UNRESOLVED_EXPANSION.test(arg)) return; // `cd -` / `cd "$var"` — can't know, leave cwd as-is
-    if (arg === "~" || arg === "~/") { cwd = HOME; return; }
-    if (arg.startsWith("~/")) { cwd = path.posix.join(HOME, arg.slice(2)); return; }
-    if (arg.startsWith("/")) { cwd = path.posix.normalize(arg); return; }
-    cwd = path.posix.normalize(path.posix.join(cwd, arg));
+    const a = toCanonicalPath(arg);
+    if (a === "~" || a === "~/") { cwd = HOME_CANON; return; }
+    if (a.startsWith("~/")) { cwd = path.posix.join(HOME_CANON, a.slice(2)); return; }
+    if (a.startsWith("/")) { cwd = path.posix.normalize(a); return; }
+    cwd = path.posix.normalize(path.posix.join(cwd, a));
   };
   let sep = null;
   const push = (nextSep) => { const text = cur; segs.push({ sep, text, cwd }); cur = ""; sep = nextSep; applyCd(text); };
@@ -318,12 +464,14 @@ function segmentsWithCwd(command, startCwd) {
  *  then resolution against the statement's cwd. A target still carrying an unresolved `$`/backtick expansion
  *  is returned as-is with unresolved:true — never guessed into looking safe. */
 function resolveTarget(raw, cwd) {
-  let t = raw;
-  if (t === "~" || t === "~/") t = HOME;
-  else if (t.startsWith("~/")) t = path.posix.join(HOME, t.slice(2));
+  let t = toCanonicalPath(raw);
+  if (t === "~" || t === "~/") t = HOME_CANON;
+  else if (t.startsWith("~/")) t = path.posix.join(HOME_CANON, t.slice(2));
   else {
-    const m = /^(?:\$\{HOME\}|\$HOME)(?=$|\/)/.exec(t);
-    if (m) t = path.posix.join(HOME, t.slice(m[0].length));
+    // $HOME / ${HOME} (POSIX and Git Bash), %USERPROFILE% (cmd), $env:USERPROFILE (PowerShell) — the same
+    // directory under four names. `~` is also what Git Bash reports for the Windows profile.
+    const m = /^(?:\$\{HOME\}|\$HOME|%USERPROFILE%|\$env:USERPROFILE)(?=$|[\/])/i.exec(t);
+    if (m) t = path.posix.join(HOME_CANON, toCanonicalPath(t.slice(m[0].length)).replace(/^\//, ""));
   }
   if (UNRESOLVED_EXPANSION.test(t)) return { path: t, unresolved: true };
   if (t.startsWith("/")) return { path: path.posix.normalize(t), unresolved: false };
@@ -426,6 +574,7 @@ function classifyZone(absPath, projectRootAbs) {
   if (under(projectRootAbs)) return "project";
   if (SCRATCH_DIRS.some(under)) return "home"; // temp-dir space is not system-owned — see SCRATCH_DIRS comment
   if (SYSTEM_PREFIXES.some((pre) => p === pre || p.startsWith(pre + "/"))) return "system";
+  if (WIN_SYSTEM_PREFIX_RE.test(p)) return "system";
   const parent = path.posix.dirname(projectRootAbs);
   if (parent !== projectRootAbs && under(parent)) return "project-adjacent";
   return "home";
@@ -644,10 +793,10 @@ function emitDecision(permissionDecision, reason) {
 function emitDeny(reason) { emitDecision("deny", reason); }
 function emitAsk(reason) { emitDecision("ask", reason); }
 
-function denyClosed(reason, cwd, sessionId) {
+function denyClosed(reason, cwd, sessionId, toolName) {
   writeAudit(cwd, {
     timestamp: new Date().toISOString(),
-    tool: "Bash",
+    tool: toolName || "Bash",
     shape: `guard-error:${reason}`,
     decision: "deny",
     session_id: sessionId,
@@ -659,15 +808,20 @@ function denyClosed(reason, cwd, sessionId) {
 function main(input) {
   if (process.env.GUARD_BASH_TEST_FORCE_THROW) throw new Error("forced test throw");
   const toolName = input.tool_name || "";
-  if (toolName !== "Bash") { process.exit(0); return; }
+  // Both command surfaces, not just Bash. On Windows the PowerShell tool is the primary shell and carries the
+  // same `tool_input.command` field; subscribing to Bash alone left that whole surface unguarded.
+  if (!GUARDED_TOOLS.has(toolName)) { process.exit(0); return; }
+  const ps = toolName === "PowerShell";
   const command = (input.tool_input && input.tool_input.command) || "";
   const cwd = input.cwd || process.cwd();
   const sessionId = input.session_id || null;
-  const root = process.env.CLAUDE_PROJECT_DIR || cwd || process.cwd();
+  // `cwd` stays native (writeAudit and readLane build real filesystem paths from it); `root` is canonical
+  // because every path comparison downstream happens in canonical space.
+  const root = path.posix.normalize(toCanonicalPath(process.env.CLAUDE_PROJECT_DIR || cwd || process.cwd()));
 
-  const shape = detectShape(command, root);
+  const shape = ps ? detectShapePowerShell(command, root) : detectShape(command, root);
   if (shape) {
-    writeAudit(cwd, { timestamp: new Date().toISOString(), tool: "Bash", shape, decision: "deny", session_id: sessionId });
+    writeAudit(cwd, { timestamp: new Date().toISOString(), tool: toolName, shape, decision: "deny", session_id: sessionId });
     emitDeny(
       `GoodBehavior guard-bash: blocked — matched hard shape "${shape}". This command is denied outright in ` +
       "the fast lane; the guard is a blocklist net, not a sandbox."
@@ -685,7 +839,7 @@ function main(input) {
     for (const hit of checkFeeds(command)) {
       const disposition = feedDisposition(hit.feed, feedLane);
       writeAudit(cwd, {
-        timestamp: new Date().toISOString(), tool: "Bash", shape: `feed:${hit.feed}:${hit.id}`,
+        timestamp: new Date().toISOString(), tool: toolName, shape: `feed:${hit.feed}:${hit.id}`,
         decision: disposition, session_id: sessionId,
       });
       if (!feedVerdict || RANK[disposition] > RANK[feedVerdict.disposition]) feedVerdict = { disposition, ...hit };
@@ -703,7 +857,7 @@ function main(input) {
 
   // Past the hard shapes: does this command touch somewhere outside the project? (Phase 3 zone ladder.)
   let notable = null; // {zone, write, path} — the most notable target found, if any
-  for (const t of extractTargets(command, root)) {
+  for (const t of (ps ? extractTargetsPowerShell(command, root) : extractTargets(command, root))) {
     const zone = t.unresolved ? "home" : classifyZone(t.path, root);
     if (!isGray(t.write, zone)) continue;
     if (!notable) notable = { zone, write: t.write, path: t.path };
@@ -711,14 +865,14 @@ function main(input) {
   }
 
   if (!notable) {
-    writeAudit(cwd, { timestamp: new Date().toISOString(), tool: "Bash", shape: null, decision: "allow", zone: "project", session_id: sessionId });
+    writeAudit(cwd, { timestamp: new Date().toISOString(), tool: toolName, shape: null, decision: "allow", zone: "project", session_id: sessionId });
     process.exit(0);
   }
 
   const lane = readLane(cwd);
   if (lane === "guarded") {
     writeAudit(cwd, {
-      timestamp: new Date().toISOString(), tool: "Bash", shape: null, decision: "ask",
+      timestamp: new Date().toISOString(), tool: toolName, shape: null, decision: "ask",
       zone: notable.zone, write: notable.write, session_id: sessionId,
     });
     emitAsk(
@@ -730,7 +884,7 @@ function main(input) {
 
   // fast lane: gray zones allow + audit (hard shapes already denied above)
   writeAudit(cwd, {
-    timestamp: new Date().toISOString(), tool: "Bash", shape: null, decision: "allow",
+    timestamp: new Date().toISOString(), tool: toolName, shape: null, decision: "allow",
     zone: notable.zone, write: notable.write, session_id: sessionId,
   });
   process.exit(0);
@@ -750,6 +904,7 @@ process.stdin.on("end", () => {
     }
     main(input);
   } catch (e) {
-    denyClosed("internal-error", (input && input.cwd) || null, (input && input.session_id) || null);
+    denyClosed("internal-error", (input && input.cwd) || null, (input && input.session_id) || null,
+      (input && input.tool_name) || null);
   }
 });

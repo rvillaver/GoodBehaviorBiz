@@ -17,18 +17,40 @@ flow upstream and back out to others.
 **Add new items here**; move them down with a date when they land. Settled work lives in the log below — it is
 not deleted, it just stops competing with live work for the top of the file.
 
-- **Windows is absent from the guard, not merely deferred** (surfaced 2026-09-14 alongside the
-  `isDangerousPath()` fix below). Backslash paths are never extracted as targets, `del`/`rmdir`/`Remove-Item`/
-  `format` are not verbs the guard knows, and DOS switches (`/f`, `/s`, `/q`) are misread as absolute POSIX
-  paths — so a recursive delete of a Windows home is **silently allowed** while the guard asks about `/f`.
-  Verified firsthand by running the hook. This is a design decision, not a patch: decide whether the guard
-  models a second path grammar, or declares POSIX-only and says so at install time. **Until it lands, the
-  guard must not be described as covering Windows.**
+- **The guard fails OPEN on a module-load error** (found 2026-09-14 while building the Windows lane; verified
+  firsthand twice). `guard-bash.js` wraps only `main()` in try/catch, so a throw at module scope — a
+  `const` read before its declaration was the real case — crashes the process before the stdin handler is
+  registered. Nothing is written to stdout, nothing is audited, and **every command is allowed**. I watched
+  68 of 75 deny cases silently pass while the hook was crashing. This directly contradicts the file's own
+  header ("any error anywhere in the decision path denies the command"). Fix: move the derived module
+  constants (`SCRATCH_DIRS`, `PROTECTED_ROOTS`, `HOME_CANON`) behind memoized accessors so their evaluation
+  happens inside `main()`'s try/catch, and add a test that a hook which throws at load still denies. Not
+  attacker-triggerable — it needs a bug in the file — but a security tool whose failure mode is "allow
+  everything, silently" is the wrong failure mode.
 
 ## Settled — promoted into the loop (log)
 
 Newest first. Each entry is kept whole: the reasoning that produced a rule is the durable part, and a
 summary of it would not survive contact with the next person asking "why is this rule here?"
+
+- **2026-09-14 — Windows: the guard was subscribed to the wrong surface** (found by probing after the
+  protected-path fix below). The first framing was wrong in an instructive way: "the guard doesn't know
+  `del`/`rmdir`/`Remove-Item`" treated this as missing verbs in the Bash lane. Checking the Claude Code docs
+  instead of reasoning from the code showed the real shape — **on native Windows `PowerShell` is a separate
+  tool with its own `tool_name`, and it is the PRIMARY shell there.** `guard-bash.js` exits on
+  `tool_name !== "Bash"`, so the main command surface on Windows never reached the hook at all. No amount of
+  verb-list work in the Bash lane would have touched it. The rule: **when a guard looks blind to a class of
+  input, check what it is subscribed to before enriching what it parses.**
+  What landed: (1) the hook subscribes to `Bash|PowerShell` (`settings.json`, `scripts/install.js`,
+  `templates/managed-settings.json`) and audits the tool that actually ran instead of a hardcoded `"Bash"`;
+  (2) a PowerShell dialect — `Remove-Item`/`rd`/`del` with `-Recurse -Force` or cmd's `/s`, `Start-Process
+  -Verb RunAs` as the sudo counterpart, `irm|iex` as the curl-pipe counterpart, `Net.Sockets.TCPClient` as
+  the reverse shell, volume format — sharing the POSIX lane's protected roots, zone ladder, audit and feeds;
+  (3) `toCanonicalPath()`, so a drive-letter path, its forward-slash variant and the Git Bash `/c/...` form
+  are one string, and `%USERPROFILE%`/`$env:USERPROFILE` join `~`/`$HOME` as spellings of one directory;
+  (4) cmd switches (`/f`, `/s`, `/q`) are no longer read as absolute POSIX paths — that bug made the guard
+  ask about `/f` while the command's real target went unexamined, which reads as coverage and is worse than
+  silence. 28 regression tests; all fail against the pre-Windows hook.
 
 - **2026-09-14 — protected paths are resolved, not pattern-matched** (found by an adopter probing the guard:
   `rm -rf ~` denied, the same directory spelled out did not). `isDangerousPath()` compared the raw token

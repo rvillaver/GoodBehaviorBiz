@@ -40,7 +40,7 @@ its files.
 | `/feeds-goodbehavior` + `scripts/feeds.js` | Opt-in threat feeds (Sigma command shapes, gitleaks secrets, URLhaus malicious URLs) — fetched only when asked. A hit denies (verbatim malware URL), asks (Sigma/credential shapes), or audits, by match precision. | skill |
 | `/write-goodbehavior` + `scripts/write/` | Edits a document so every word is load-bearing: rules keep their emphasis, rationale goes plain. Gated by a rule fingerprint that flags any obligation the rewrite may have dropped. | skill |
 | `.claude/hooks/done-gate.js` + `.claude/settings.json` | Stop hook: pushes back on "done" without evidence — including *behaviorally*: verification vocabulary is honored only if something was actually run/observed after the last file change that turn. | enforcement |
-| `.claude/hooks/guard-bash.js` | `PreToolUse`/`Bash` hook: denies a small set of hard-dangerous shapes outright (sudo/doas, download-piped-to-shell, reverse shell, recursive delete of root, home, or system); past that, a zone ladder decides per command target — silent in-project, asked (guarded lane) or allowed-and-audited (fast lane) everywhere else. | enforcement |
+| `.claude/hooks/guard-bash.js` | `PreToolUse` hook on **`Bash` and `PowerShell`**: denies a small set of hard-dangerous shapes outright (sudo/doas and UAC elevation, download-piped-to-shell, reverse shell, volume format, recursive delete of root, a drive, home, or system); past that, a zone ladder decides per command target — silent in-project, asked (guarded lane) or allowed-and-audited (fast lane) everywhere else. | enforcement |
 | `.claude/hooks/guard-injection.js` | `UserPromptSubmit` + `PostToolUse`(`Read`\|`WebFetch`) hook: flags content matching a named prompt-injection shape — never blocks, never drops a prompt. | enforcement |
 | `scripts/install.js` · `scripts/update.js` · `scripts/report.js` | The mechanical halves of adopt/update/report, deterministic: copy+hash+wire+manifest, the git 3-way merge, and audit JSONL aggregation. The skills keep the judgment; the scripts keep the consistency. | tooling |
 | `templates/managed-settings.json` + `templates/OWNER-SETUP.md` | Machine-wide, owner-enforced deployment: hooks a project can't shed, bypass mode locked off. Not installed by `/adopt-goodbehavior` — a separate, admin-driven setup. | enforcement |
@@ -89,11 +89,16 @@ as the done-gate. (Requires the source to be a committed git repo so the merge b
 
 Three hooks, wired by `/adopt-goodbehavior` (independently — take any subset):
 
-- **`guard-bash.js`** (`PreToolUse`/`Bash`) — a small set of hard shapes (sudo/doas, download-piped-to-shell,
-  reverse shell, recursive delete of root, home, or system paths) are denied outright, in every lane, no exceptions.
-  Past that, a **zone ladder** looks at what the command actually touches: silent inside the project; anything
-  reaching outside it (home, a sibling project, a system path) is **gray** — the guarded lane asks, the fast
-  lane allows it and writes an audit line either way.
+- **`guard-bash.js`** (`PreToolUse` on `Bash` and `PowerShell`) — a small set of hard shapes (sudo/doas and
+  Windows UAC elevation, download-piped-to-shell, reverse shell, volume format, recursive delete of root, a whole
+  drive, home, or system paths) are denied outright, in every lane, no exceptions. Past that, a **zone ladder**
+  looks at what the command actually touches: silent inside the project; anything reaching outside it (home, a
+  sibling project, a system path) is **gray** — the guarded lane asks, the fast lane allows it and writes an audit
+  line either way.
+  It covers **both command surfaces on every platform**: Bash on macOS and Linux, and on Windows both Git Bash
+  (the Bash tool) and the PowerShell tool, which is the primary shell there. A directory is protected by what it
+  *is*, not how it is spelled — tilde, `$HOME`, `%USERPROFILE%`, `$env:USERPROFILE`, `C:\…`, and `/c/…` all
+  resolve to one path before the guard decides.
 - **`guard-injection.js`** (`UserPromptSubmit` + `PostToolUse` on `Read`/`WebFetch`) — content matching a named
   prompt-injection shape gets flagged back to the model as data to distrust, never blocked. Your prompt is never
   dropped; a fetched or read file's embedded instructions are never followed silently.
