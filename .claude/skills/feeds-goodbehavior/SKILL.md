@@ -22,7 +22,7 @@ recoverable via `rollback`. It is the only feed precise enough to decide in both
 telemetry, and the fields carrying their real signal — parent process, user, session type — are not available
 to a `PreToolUse` hook and get dropped at compile time. What survives is a bare command-shape match, and those
 shapes (`nohup`, `grep password`, `curl --data`, `bash -c /tmp/x`) are the ordinary vocabulary of agent work.
-**So it asks only in the guarded lane.** It asked in both until 2026-10-02, when the audit trail showed it was
+So it asks only in the guarded lane. It asked in both until 2026-10-02, when the audit trail showed it was
 259 asks across two real projects in three weeks — every one benign, and 100% of all interruptions.
 
 **Blocking cannot un-leak a credential already in the command**, so for `secrets` the audit line is the real
