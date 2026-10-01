@@ -650,8 +650,10 @@ function readLane(cwd) {
   return "guarded";
 }
 
-// ---- threat feeds (Phase 6): opt-in, monitor-mode only — never affects the deny/ask/allow decision above,
-// only adds an extra audited line when a command matches a compiled feed rule. Reads pre-compiled rules.json
+// ---- threat feeds (Phase 6): opt-in. A hit is always audited; whether it also DECIDES (deny/ask) is
+// `feedDisposition`'s call below — `urls` can deny and the guarded lane can ask, so this is not monitor-only.
+// (It said "monitor-mode only" here until 2026-10-02 while the code below asked on every Sigma hit: a stated
+// invariant is not a tested one. The honest statement is the one above.) Reads pre-compiled rules.json
 // only (no TOML/YAML/zip parsing at hook-invocation time — that only happens in `feeds update`). The matching
 // logic here is intentionally a self-contained copy of scripts/feeds/evaluate.js, not a require() of it: this
 // file must keep working when copied standalone to a machine-wide location (templates/OWNER-SETUP.md), where
@@ -682,22 +684,48 @@ function feedAgeDays(name) {
 // *currently* distributing malware, so a stale copy asserts a fact it can no longer back.
 const FEED_MAX_AGE_DAYS = { urls: 7, commands: 30, secrets: 30 };
 
-/** deny | ask | monitor for one feed hit. Disposition tracks MATCH PRECISION, not the lane:
- *   urls     — exact string vs a live malware-distribution list. Denied. A bad entry can only block commands
- *              containing that exact URL, so the blast radius of a poisoned rule is bounded and recoverable
- *              (`feeds rollback`). Downgraded to ask when the list is stale.
- *   commands — Sigma, judged on CommandLine+Image only (rules needing unavailable fields are skipped at
- *              compile time, never guessed). Human judgment is exactly what's wanted: ask.
- *   secrets  — translated Go-RE2 regexes; the one feed with a demonstrated over-match (see checkFeeds).
- *              Asks where a human is present, monitors in the fast lane. Blocking cannot un-leak a credential
- *              that is already in the command, so the audit line is the real product here.
- * Lane is consulted ONLY for `secrets` — the noisiest feed defers to the lane; the precise ones don't. */
-function feedDisposition(feed, lane) {
+/** deny | ask | monitor for one feed hit. Disposition tracks MATCH PRECISION, and precision is what decides
+ *  whether the lane gets consulted:
+ *   urls     — exact string vs a live malware-distribution list. Denied, in either lane. A bad entry can only
+ *              block commands containing that exact URL, so the blast radius of a poisoned rule is bounded and
+ *              recoverable (`feeds rollback`). Downgraded to ask when the list is stale.
+ *   commands — Sigma `process_creation` rules, judged on CommandLine+Image ONLY. The fields that carry the
+ *              actual signal in that corpus — parent process, user, session type — are not available to a
+ *              PreToolUse hook and are dropped at compile time. What survives is a bare command-shape match,
+ *              and those shapes (`nohup`, `grep password`, `curl --data`, `bash -c /tmp/x`) are the ordinary
+ *              vocabulary of agent work: anomalous in the server telemetry Sigma was written for, unremarkable
+ *              here. So this is the LEAST precise feed, not the most: asks in the guarded lane, monitors in the
+ *              fast one. It asked in BOTH until 2026-10-02 — 259 asks across two real projects in three weeks,
+ *              every one of them benign, 100% of all interruptions. See TODO.md's settled log.
+ *   secrets  — translated Go-RE2 regexes, with a demonstrated over-match (see checkFeeds). Asks where a human
+ *              is present, monitors in the fast lane. Blocking cannot un-leak a credential that is already in
+ *              the command, so the audit line is the real product here.
+ * A MUTED rule floors at monitor: still audited, never decides. The fast lane's bargain is that gray is
+ * allowed-and-logged; a heuristic feed that asks anyway breaks exactly that promise. */
+function feedDisposition(feed, lane, muted) {
+  if (muted) return "monitor";
   const stale = !(feedAgeDays(feed) !== null && feedAgeDays(feed) <= (FEED_MAX_AGE_DAYS[feed] || 30));
   if (feed === "urls") return stale ? "ask" : "deny";
-  if (feed === "commands") return "ask";
+  if (feed === "commands") return lane === "guarded" ? "ask" : "monitor";
   if (feed === "secrets") return lane === "guarded" ? "ask" : "monitor";
   return "monitor";
+}
+
+/** Rule ids this PROJECT has muted, from `.claude/goodbehavior/feeds-ignore.json` (written by
+ *  `feeds.js mute`). Per-project by design: an exemption is a statement about one codebase's normal work, and
+ *  it stays readable in the tree it applies to rather than silently covering every project on the machine.
+ *  A mute only ever weakens a decision to `monitor` — the hit is still matched and still audited, so
+ *  `/report-goodbehavior` can show what a mute has been absorbing. Unreadable/malformed file = no mutes. */
+function feedMutes(cwd) {
+  const ids = new Set();
+  try {
+    const base = process.env.CLAUDE_PROJECT_DIR || cwd || process.cwd();
+    const parsed = JSON.parse(fs.readFileSync(path.join(base, ".claude", "goodbehavior", "feeds-ignore.json"), "utf8"));
+    for (const e of (Array.isArray(parsed.muted) ? parsed.muted : [])) {
+      if (e && typeof e.id === "string") ids.add(e.id);
+    }
+  } catch (e) { /* absent or malformed — mute nothing, which is the safe direction */ }
+  return ids;
 }
 
 /** Plain-language why, for a human deciding in the moment. Names the feed and rule id, NEVER the matched
@@ -884,12 +912,14 @@ function main(input) {
   let feedVerdict = null; // {disposition, feed, id}
   try {
     const feedLane = readLane(cwd);
+    const muted = feedMutes(cwd);
     const RANK = { monitor: 0, ask: 1, deny: 2 };
     for (const hit of checkFeeds(command)) {
-      const disposition = feedDisposition(hit.feed, feedLane);
+      const isMuted = muted.has(hit.id);
+      const disposition = feedDisposition(hit.feed, feedLane, isMuted);
       writeAudit(cwd, {
         timestamp: new Date().toISOString(), tool: toolName, shape: `feed:${hit.feed}:${hit.id}`,
-        decision: disposition, session_id: sessionId,
+        decision: disposition, ...(isMuted ? { muted: true } : {}), session_id: sessionId,
       });
       if (!feedVerdict || RANK[disposition] > RANK[feedVerdict.disposition]) feedVerdict = { disposition, ...hit };
     }

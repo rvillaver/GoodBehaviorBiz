@@ -37,6 +37,13 @@ Write a short, plain-language summary a non-technical owner can read in under a 
   means it was held for confirmation, `monitor` means it ran and the guard only left a note. **Translate the feed name**
   (`commands`→"a known-risky command shape", `secrets`→"a credential-shaped pattern", `urls`→"a URL listed as
   distributing malware") **rather than printing the raw rule id.**
+- **What a mute is absorbing** (`muted`, present when the project has muted any feed rule). Each entry carries
+  the reason it was muted for and `absorbed_this_period`. **Report every mute, including the ones that absorbed
+  nothing** — a mute is a deliberate silence, and the failure mode is a list set once, never revisited, quietly
+  swallowing a rising count. A mute with a climbing count is worth a sentence: either the rule is genuinely
+  routine here, or the thing it names has become common and someone should look. **Say what a mute does
+  exactly: the rule still matched and was still logged, it just didn't ask.** Never report it as a rule that is
+  off, and never present a muted period as a quiet one.
 - **If `notable` is empty** — say so plainly ("nothing notable this period — N events, all normal in-project
   activity"). An empty report is a legitimate, good result. **Don't pad it out or apologize for it.**
 

@@ -86,6 +86,38 @@ function main() {
       const out2 = runReport(target);
       check("malformed line skipped, not crashed", out2.totals.events === 8 && out2.warnings.some((w) => w.includes("unparseable")));
     }
+
+    // Muted feed rules. A mute is a deliberate silence, so the report has to name it and say what it
+    // swallowed — the failure mode is a mute list set once, never revisited, absorbing a rising count.
+    {
+      const out = runReport(target);
+      check("no mutes: no muted section invented", out.muted === undefined);
+
+      fs.writeFileSync(path.join(target, ".claude", "goodbehavior", "feeds-ignore.json"), JSON.stringify({
+        muted: [
+          { id: "r-nohup", feed: "commands", description: "Nohup Execution", reason: "we background dev servers", muted_at: "2026-09-09T00:00:00Z" },
+          { id: "r-idle", feed: "commands", description: "Never Fires", reason: "pre-emptive", muted_at: "2026-09-09T00:00:00Z" },
+        ],
+      }));
+      writeAuditFile(target, "2026-09-12", [
+        { timestamp: "2026-09-12T10:00:00Z", tool: "Bash", shape: "feed:commands:r-nohup", decision: "monitor", muted: true, session_id: "s9" },
+        { timestamp: "2026-09-12T10:01:00Z", tool: "Bash", shape: "feed:commands:r-nohup", decision: "monitor", muted: true, session_id: "s9" },
+      ]);
+      const out3 = runReport(target);
+      const nohup = out3.muted.find((m) => m.id === "r-nohup");
+      check("muted: each mute is listed with the reason it was muted for",
+        nohup && nohup.reason === "we background dev servers", JSON.stringify(out3.muted));
+      check("muted: counts what the mute absorbed this period", nohup && nohup.absorbed_this_period === 2, JSON.stringify(nohup));
+      check("muted: loudest mute first", out3.muted[0].id === "r-nohup", JSON.stringify(out3.muted.map((m) => m.id)));
+      check("muted: a mute that absorbed nothing is STILL reported (the mute itself is the finding)",
+        out3.muted.some((m) => m.id === "r-idle" && m.absorbed_this_period === 0));
+      check("muted: warns when a mute is actively swallowing matches",
+        out3.warnings.some((w) => /muted feed rule\(s\) absorbed 2 match/.test(w)), JSON.stringify(out3.warnings));
+      check("muted: a muted hit still appears in notable (logged, never hidden)",
+        out3.notable.some((e) => e.shape === "feed:commands:r-nohup" && e.muted === true));
+      check("muted: scoping the period to before the mutes fired shows them absorbing nothing",
+        runReport(target, ["--until", "2026-09-11"]).muted.every((m) => m.absorbed_this_period === 0));
+    }
   } finally {
     fs.rmSync(target, { recursive: true, force: true });
   }

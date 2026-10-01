@@ -3,6 +3,33 @@
 Every entry here is a unit a downstream project will 3-way-merge via `/update-goodbehavior` — write entries so an
 adopter skimming before an update knows what's coming and why.
 
+## 2026-10-02 — the Sigma feed stops asking in the fast lane, and a rule can be muted
+
+**The `commands` feed was 100% of the guard's interruptions, and every one was benign.** Across two real
+projects over three weeks the audit trail holds 6,441 events: 5,849 allow, 312 monitor, 19 deny, and 259 ask —
+all 259 of them `feed:commands:<sigma-rule-id>`. Not one came from the zone ladder, which allowed and logged
+1,407 out-of-project touches exactly as the fast lane promises. Ten rules produced 250 of the asks: `nohup`,
+`grep` near the word `password`, `curl --data`, `bash -c` with a `/tmp/` path, `sysctl hw.`, `chmod` on `/tmp/`.
+
+- **`commands` now asks in the guarded lane and monitors in the fast one.** Its disposition claimed to track
+  match precision and had the ranking backwards. Sigma `process_creation` rules are written for server
+  telemetry; the fields carrying their signal — parent process, user, session type — aren't available to a
+  `PreToolUse` hook and are dropped at compile time. What survives is a bare command-shape match, and those
+  shapes are the ordinary vocabulary of agent work. It is the least precise feed, not the most.
+- **`feeds.js mute` — a per-project mute list** at `.claude/goodbehavior/feeds-ignore.json`. A hook `ask` has
+  no host-side "always allow", so the same rule re-asks forever; one rule asked 115 times and got "yes" 115
+  times. **A muted rule is still matched and still audited**, tagged `muted: true` and floored at `monitor`.
+  With no ids given it opens a menu built from that project's own audit trail, loudest first, with each rule's
+  description, severity and patterns — rules that have actually interrupted the project arrive pre-ticked,
+  `urls` rules never do. `unmute` reverses it; re-running `mute` preserves existing reasons and dates.
+- **`/report-goodbehavior` reports every mute** and what it absorbed in the period, including mutes that
+  absorbed nothing. A deliberate silence has to stay visible, or the list is set once and never revisited.
+- **The feed section's header comment said "monitor-mode only — never affects the deny/ask/allow decision"**
+  while the code below it asked on every Sigma hit. It now states what the code does. A stated invariant is
+  not a tested one — the same trap that hid the fail-open guard bug in 2026-09-14.
+- 24 new tests (14 in `test_guard.js`, a new `test_mutes.js`, 8 in `test_report.js`), including the lane
+  regression and the degradation direction: a malformed mute file mutes nothing, never everything.
+
 ## 2026-09-13 — done-gate fires again: host tool names, and a scoped hedge
 
 **The done-gate had never fired under Claude Code.** Its tool sets were keyed on the sibling host's

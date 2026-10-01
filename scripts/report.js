@@ -13,6 +13,7 @@
 "use strict";
 const fs = require("fs");
 const path = require("path");
+const { readMutes } = require("./feeds/mutes");
 
 function die(msg) {
   process.stderr.write(msg + "\n");
@@ -47,6 +48,7 @@ function main() {
     return 0;
   }
 
+  const absorbed = {}; // "feed:<name>:<id>" -> how many matches a mute swallowed this period
   const files = fs.readdirSync(auditDir)
     .filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
     .filter((f) => (!since || f.slice(0, 10) >= since) && (!until || f.slice(0, 10) <= until))
@@ -70,9 +72,28 @@ function main() {
       const notable = decision === "deny" || decision === "ask" || decision === "annotated" || decision === "monitor" ||
         (decision === "allow" && entry.zone && entry.zone !== "project");
       if (notable) out.notable.push(entry);
+      if (entry.muted && entry.shape) absorbed[entry.shape] = (absorbed[entry.shape] || 0) + 1;
     }
   }
   out.notable.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
+
+  // Muted feed rules, and what each one absorbed this period. A mute is a deliberate silence, so it has to
+  // stay VISIBLE: the failure mode is a mute list that grows once, is never revisited, and quietly swallows a
+  // rising count. Reported even when it absorbed nothing in the period — the mute itself is the finding.
+  const muted = readMutes(target);
+  if (muted.length) {
+    out.muted = muted.map((m) => ({
+      id: m.id, feed: m.feed || null, description: m.description || null,
+      reason: m.reason || null, muted_at: m.muted_at || null,
+      absorbed_this_period: absorbed[`feed:${m.feed}:${m.id}`] || 0,
+    })).sort((a, b) => b.absorbed_this_period - a.absorbed_this_period);
+    const loud = out.muted.filter((m) => m.absorbed_this_period > 0);
+    if (loud.length) {
+      out.warnings.push(`${loud.length} muted feed rule(s) absorbed ${loud.reduce((n, m) => n + m.absorbed_this_period, 0)} ` +
+        `match(es) this period — matched and logged, but not asked about. Review with \`feeds.js mute --project ${target}\`, ` +
+        `un-mute with \`feeds.js unmute\`.`);
+    }
+  }
 
   process.stdout.write(JSON.stringify(out, null, 2) + "\n");
   return 0;

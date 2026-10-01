@@ -37,7 +37,7 @@ its files.
 | `/learn-goodbehavior` | Writes a durable learning to memory (so it's not relearned). | skill |
 | `/update-goodbehavior` | Pulls the latest bundle from its source repo and 3-way-merges it into the local copy, preserving project-local adaptations. | skill |
 | `/report-goodbehavior` | Turns the guard's audit trail into an owner-readable digest — what ran, what got blocked or flagged and why, over a period. | skill |
-| `/feeds-goodbehavior` + `scripts/feeds.js` | Opt-in threat feeds (Sigma command shapes, gitleaks secrets, URLhaus malicious URLs) — fetched only when asked. A hit denies (verbatim malware URL), asks (Sigma/credential shapes), or audits, by match precision. | skill |
+| `/feeds-goodbehavior` + `scripts/feeds.js` | Opt-in threat feeds (Sigma command shapes, gitleaks secrets, URLhaus malicious URLs) — fetched only when asked. A hit denies (verbatim malware URL), asks (heuristic shapes, guarded lane), or audits, by match precision. `mute` opens a menu of the rules that have actually interrupted a project. | skill |
 | `/write-goodbehavior` + `scripts/write/` | Edits a document so every word is load-bearing: rules keep their emphasis, rationale goes plain. Gated by a rule fingerprint that flags any obligation the rewrite may have dropped. | skill |
 | `.claude/hooks/done-gate.js` + `.claude/settings.json` | Stop hook: pushes back on "done" without evidence — including *behaviorally*: verification vocabulary is honored only if something was actually run/observed after the last file change that turn. | enforcement |
 | `.claude/hooks/guard-bash.js` | `PreToolUse` hook on **`Bash` and `PowerShell`**: denies a small set of hard-dangerous shapes outright (sudo/doas and UAC elevation, download-piped-to-shell, reverse shell, volume format, recursive delete of root, a drive, home, or system); past that, a zone ladder decides per command target — silent in-project, asked (guarded lane) or allowed-and-audited (fast lane) everywhere else. | enforcement |
@@ -115,11 +115,21 @@ session can't shed, see `templates/OWNER-SETUP.md`.
 **Threat feeds (optional, `/feeds-goodbehavior`).** Beyond the hardcoded shapes, the guard can check commands
 and fetched URLs against three external, regularly-updated feeds — SigmaHQ command-shape rules, gitleaks
 credential patterns, URLhaus malicious URLs. **Opt-in**: nothing is fetched until you run
-`node scripts/feeds.js opt-in`. A hit's disposition tracks how precise the match is — a fresh, verbatim URLhaus
-hit denies; a Sigma command shape or a credential pattern is held for confirmation; a credential pattern in the
-fast lane is audited only. Stale data downgrades a deny to an ask, and every decision carries a plain-language
-reason naming the rule but never the matched text — same honesty rule as the rest of
-the guard, stated plainly at opt-in time, not buried in a flag.
+`node scripts/feeds.js opt-in`. A hit's disposition tracks how precise the match is: a fresh, verbatim URLhaus
+hit denies in either lane, because an exact string match can only ever block commands containing that string.
+The two heuristic feeds — Sigma command shapes and credential patterns — hold for confirmation in the guarded
+lane and audit only in the fast one, where the lane's whole bargain is that gray is allowed and logged. Stale
+data downgrades a deny to an ask, and every decision carries a plain-language reason naming the rule but never
+the matched text — same honesty rule as the rest of the guard, stated plainly at opt-in time, not buried in a
+flag.
+
+**Muting a rule that keeps asking about ordinary work.** A hook `ask` gets the host's bare yes/no prompt —
+there's no "always allow" for a hook decision, so a rule that matches your normal work re-asks forever.
+`node scripts/feeds.js mute` opens a menu of the rules that have actually fired in a project, loudest first,
+with what each one matches; the ones that have interrupted you arrive pre-ticked. **A muted rule is still
+matched and still audited** — it stops deciding, not recording, and `/report-goodbehavior` lists every mute
+alongside what it absorbed. Mutes are per-project, in `.claude/goodbehavior/feeds-ignore.json`, because an
+exemption is a claim about one codebase's normal work.
 
 ## The honest caveat
 

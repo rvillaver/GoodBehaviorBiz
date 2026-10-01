@@ -116,6 +116,34 @@ settings.json as a same-session-only convenience, never the actual switch.
   lookup (`dv_()` reads a hardcoded platform switch) — not confirmed to safely redirect a local test away from
   the real system path, so it wasn't relied on. Worth re-checking if a future session wants a sudo-free live test.
 
+**Confirmed live (2026-10-02) — the `commands` feed was the guard's only source of interruptions, and the
+noise was a context mismatch, not a tuning problem.** Checked against the real audit trails of two projects
+running the bundle (`gittea`, `BlitzWork`): 6,441 events, 259 asks, **100% of them `feed:commands:*`, zero from
+the zone ladder.** Both projects are fast lane (`defaultMode: bypassPermissions`), so the ladder allowed-and-
+logged 1,407 out-of-project touches silently, as designed — the ladder was never the problem, and probing it
+first would have wasted the session.
+- **How to diagnose this class of complaint fast:** tally `decision` and `shape` straight out of
+  `.claude/goodbehavior/audit/*.jsonl` before reading any guard code. The audit is deliberately
+  shape-only (no command text), so the next step is joining rule ids back to
+  `~/.goodbehavior/feeds/commands/rules.json` for descriptions and patterns — that join is what
+  `scripts/feeds/mutes.js` now does for the mute menu, so reuse it rather than re-writing the tally.
+- **Why the rules fired:** Sigma `process_creation` rules assume EDR telemetry (parent process, user, session
+  type). A `PreToolUse` hook has none of those fields; they're dropped at compile time, leaving a bare
+  command-shape match. `nohup`, `grep password`, `curl --data`, `bash -c /tmp/x` are anomalous on a server and
+  ordinary in an agent session. **Treat a borrowed detection corpus by the fields that survive here, not by the
+  corpus's reputation** — and note `feedDisposition`'s old comment had Sigma ranked as the *most* precise feed
+  on exactly that reputation reasoning.
+- **A hook `ask` has no "always allow".** PreToolUse `permissionDecision: "ask"` gets the host's bare yes/no
+  prompt with no persistent-allow option, so a rule matching routine work re-asks on every match indefinitely
+  (one rule: 115 asks, 115 yeses). Any future ask-emitting guard layer needs its own suppression memory or it
+  trains the user to answer without reading. Mutes live per-project at
+  `.claude/goodbehavior/feeds-ignore.json`; `guard-bash.js`'s `feedMutes()` reads it and floors a muted hit at
+  `monitor` (still audited, tagged `muted:true`).
+- **The header comment lied, for the second time.** The feed section said "monitor-mode only — never affects
+  the deny/ask/allow decision" while the code asked on every hit, exactly like the fail-open entry below whose
+  header promised "any error anywhere in the decision path denies the command." **In this file, a `never`/`only`
+  in a hook comment is a claim to test, not documentation to trust.**
+
 **Confirmed (2026-09-11) — Phase 6, threat feeds (`scripts/feeds/`), re-derived zero-dependency TOML/YAML
 parsers + a Sigma condition compiler, built and verified against real live feeds, not synthetic fixtures:**
 - **Real corpus checked, not assumed**: fetched the actual live gitleaks.toml (97KB/222 rules), the actual live

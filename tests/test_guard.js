@@ -23,11 +23,19 @@ function mkScratch() {
   return fs.mkdtempSync(path.join(TEST_HOME_BASE, "guard-bash-"));
 }
 
-function runHook(commandOrFn, { toolName = "Bash", env = {}, rawStdin = null, sessionId = "test-session", lane = null } = {}) {
+function runHook(commandOrFn, { toolName = "Bash", env = {}, rawStdin = null, sessionId = "test-session", lane = null, mutes = null, rawMutes = null } = {}) {
   const scratch = mkScratch();
   if (lane === "fast") {
     fs.mkdirSync(path.join(scratch, ".claude"), { recursive: true });
     fs.writeFileSync(path.join(scratch, ".claude", "settings.json"), JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } }));
+  }
+  // Per-project feed-rule mutes (scripts/feeds.js mute). `rawMutes` writes the file verbatim, for the
+  // malformed-input cases — a mute file that cannot be parsed must mute nothing, never everything.
+  if (mutes || rawMutes !== null) {
+    const dir = path.join(scratch, ".claude", "goodbehavior");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "feeds-ignore.json"),
+      rawMutes !== null ? rawMutes : JSON.stringify({ muted: mutes.map((id) => ({ id, reason: "test" })) }));
   }
   const command = typeof commandOrFn === "function" ? commandOrFn(scratch) : commandOrFn;
   const input = rawStdin !== null ? rawStdin : JSON.stringify({
@@ -310,7 +318,8 @@ function main() {
     };
     const ALL = { feeds: { secrets: [SECRET], commands: [SIGMA], urls: [URLRULE] } };
     const fresh = mkFeeds(ALL, 0);
-    const run = (cmd, opts = {}) => runHook(cmd, { env: { GOODBEHAVIOR_FEEDS_DIR: opts.dir || fresh }, lane: opts.lane || null });
+    const run = (cmd, opts = {}) => runHook(cmd, { env: { GOODBEHAVIOR_FEEDS_DIR: opts.dir || fresh },
+      lane: opts.lane || null, mutes: opts.mutes || null, rawMutes: opts.rawMutes === undefined ? null : opts.rawMutes });
 
     {
       const dir = mkFeeds({ optIn: false, feeds: { secrets: [SECRET] } });
@@ -336,7 +345,53 @@ function main() {
     }
     {
       const { decision } = run("nc -zv localhost 8080"); // no exec flag -> not our own hard shape
-      check("feeds/commands: sigma hit ASKS", decision === "ask", `decision=${decision}`);
+      check("feeds/commands: sigma hit ASKS in the guarded lane", decision === "ask", `decision=${decision}`);
+    }
+    {
+      // THE regression. This asked in both lanes until 2026-10-02, and it was 100% of all interruptions across
+      // two real projects for three weeks — 259 asks, every one benign. A Sigma process_creation rule judged on
+      // CommandLine+Image alone is the LEAST precise feed, not the most: the fields carrying its real signal
+      // (parent process, user, session type) aren't available to a PreToolUse hook. The fast lane's bargain is
+      // that gray is allowed-and-logged; a heuristic feed that asks anyway breaks exactly that promise.
+      const { decision, auditLines } = run("nc -zv localhost 8080", { lane: "fast" });
+      check("feeds/commands: MONITORS in the fast lane (a heuristic feed must not break the lane's bargain)",
+        decision === null, `decision=${decision}`);
+      check("feeds/commands: the fast-lane hit is still AUDITED (quieter, never blind)",
+        auditLines.some((l) => l.decision === "monitor" && l.shape === "feed:commands:fake-nc-listener"),
+        JSON.stringify(auditLines));
+    }
+    {
+      // Mutes: the hook's own memory, because a hook `ask` has no host-side "always allow" and so re-asks
+      // forever. A mute FLOORS at monitor — it stops the rule deciding, it never stops it being recorded.
+      const { decision, auditLines } = run("nc -zv localhost 8080", { mutes: ["fake-nc-listener"] });
+      check("feeds/mute: a muted rule stops asking in the guarded lane",
+        decision === null, `decision=${decision}`);
+      check("feeds/mute: the muted hit is still audited, and tagged muted:true so a report can show it",
+        auditLines.some((l) => l.shape === "feed:commands:fake-nc-listener" && l.decision === "monitor" && l.muted === true),
+        JSON.stringify(auditLines));
+    }
+    {
+      const { decision } = run("nc -zv localhost 8080", { mutes: ["some-other-rule"] });
+      check("feeds/mute: muting one rule doesn't mute another", decision === "ask", `decision=${decision}`);
+    }
+    {
+      const { decision } = run("echo AKIAABCDEFGHIJKLMNOP", { mutes: ["fake-aws-key"] });
+      check("feeds/mute: mutes apply across feeds, not just commands", decision === null, `decision=${decision}`);
+    }
+    {
+      // Degradation direction: an unparseable mute file must mute NOTHING. The opposite failure (mute
+      // everything) would silently disarm the feed layer, which is the one outcome a mute must never produce.
+      const { decision } = run("nc -zv localhost 8080", { rawMutes: "{ this is not json" });
+      check("feeds/mute: a malformed mute file mutes nothing (fails toward the ask, not toward silence)",
+        decision === "ask", `decision=${decision}`);
+      const wrong = run("nc -zv localhost 8080", { rawMutes: JSON.stringify({ muted: "fake-nc-listener" }) });
+      check("feeds/mute: a mute file of the wrong SHAPE mutes nothing",
+        wrong.decision === "ask", `decision=${wrong.decision}`);
+    }
+    {
+      const { decision } = run("curl -o x http://bad.example.invalid/x", { mutes: ["fake-listed-url"] });
+      check("feeds/mute: muting a urls rule does lift its deny (documented, warned about at mute time)",
+        decision === null, `decision=${decision}`);
     }
     {
       const { decision, reason } = run("echo AKIAABCDEFGHIJKLMNOP");

@@ -17,12 +17,54 @@ flow upstream and back out to others.
 **Add new items here**; move them down with a date when they land. Settled work lives in the log below — it is
 not deleted, it just stops competing with live work for the top of the file.
 
-_Nothing open._
+- [ ] **Skip the un-evaluable Sigma rules at compile time, with a named reason each.** The 2026-10-02 entry
+      below made the `commands` feed quiet by lane and by mute, which is the right fix for the *interruption*.
+      It does not fix the *corpus*: ten rules whose signal lives in fields a `PreToolUse` hook never sees are
+      still compiled in and still matched. `scripts/feeds/` already has the honest mechanism — rules needing
+      unavailable fields are skipped and counted, never guessed — so these belong in `skipped` with a reason,
+      not in `rules`. Needs a decision on the criterion (per-rule list vs. "any rule whose selections reduce
+      to a bare CommandLine substring") plus tests; **the criterion is the whole question, so don't start by
+      hardcoding ten UUIDs.**
+- [ ] **Audit the remaining `never`/`only` claims in the hook comments against their code.** Twice now a false
+      invariant has sat in a header comment reading as reassurance: the fail-open guard (2026-09-14) and the
+      feed section's "monitor-mode only" (2026-10-02). Two is a pattern. Grep the three hooks for absolute
+      claims and check each one has a test.
 
 ## Settled — promoted into the loop (log)
 
 Newest first. Each entry is kept whole: the reasoning that produced a rule is the durable part, and a
 summary of it would not survive contact with the next person asking "why is this rule here?"
+
+- **2026-10-02 — a detection corpus borrowed from another context is not evidence in yours** (surfaced by
+  the user, not by a test: "it has been hitting non-destructive non-invasive calls and has been preventing
+  continuous loops for a few weeks, and it's a yes-or-no only, no always"). The guard's own audit trail
+  settled it in one pass — 6,441 events across two real projects, 259 asks, **all 259 from the `commands`
+  feed and not one from the zone ladder.** Ten Sigma rules produced 250 of them: `nohup`, `grep` near
+  `password`, `curl --data`, `bash -c` with `/tmp/`, `sysctl hw.`, `chmod /tmp/`. The ladder meanwhile
+  allowed-and-logged 1,407 out-of-project touches without interrupting anyone, which is exactly its job.
+  The framing that produced the bug was a plausible one: Sigma is a curated, respected, regularly-updated
+  ruleset, so a match felt like strong evidence, and `feedDisposition`'s comment ranked it as the *most*
+  precise feed — above gitleaks regexes — on the reasoning that "human judgment is exactly what's wanted."
+  But Sigma `process_creation` rules are written for **EDR telemetry on a server**, where the signal lives in
+  parent process, user, and session type. A `PreToolUse` hook can't see those fields, so they're dropped at
+  compile time, and what's left is a bare command-shape match. `nohup` is anomalous in server telemetry and
+  is how you background a dev server. **The corpus was never wrong; it was being asked a question its fields
+  can't answer.** The rule: *judge a borrowed ruleset by the fields that survive YOUR context, not by the
+  reputation of the corpus it came from.* A rule stripped of the context that gave it meaning is a
+  coincidence detector.
+  Three things landed. (1) `commands` asks in the guarded lane and monitors in the fast one — the fast lane's
+  bargain is that gray is allowed-and-logged, and a heuristic feed that asks anyway breaks precisely that
+  promise. (2) **Per-project mutes** (`feeds.js mute`), because the host gives a hook `ask` no "always allow"
+  and so the same rule re-asks forever; one rule asked 115 times and was answered "yes" 115 times, which is
+  not consent, it's attrition. A mute floors at `monitor`: still matched, still audited, tagged `muted:true`,
+  and surfaced by `/report-goodbehavior` with what it absorbed — **a deliberate silence has to stay visible
+  or the list gets set once and never revisited.** The menu is built from the project's own audit trail rather
+  than the 121-rule corpus, loudest first, pre-ticking only what has actually interrupted that project; it
+  can't show the commands, because the audit stores rule ids only, so the human judges the rule. (3) The feed
+  section's header comment claimed "monitor-mode only — never affects the deny/ask/allow decision" while the
+  code below asked on every hit. **Same trap as the fail-open bug below: a stated invariant is not a tested
+  one.** Twice now the false claim was in a comment that read as reassurance — worth checking the remaining
+  "never"/"only" comments in the hooks against their code rather than waiting for the third.
 
 - **2026-09-14 — the guard failed OPEN on a load error; a blocklist must fail closed even when it is the
   broken thing** (surfaced twice while building the Windows lane, both times a `const` read before its own
