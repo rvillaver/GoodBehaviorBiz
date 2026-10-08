@@ -17,26 +17,6 @@ flow upstream and back out to others.
 **Add new items here**; move them down with a date when they land. Settled work lives in the log below — it is
 not deleted, it just stops competing with live work for the top of the file.
 
-- [ ] **BUG (data loss, found live 2026-10-02): a merged file is reverted by the NEXT update.** `update.js`
-      classifies a file as "untouched since install" by comparing the local file's sha256 to the manifest's.
-      After a 3-way **merge**, it refreshes the manifest sha to the *merged* (locally-adapted) content — so on
-      the next run that adapted file matches its manifest sha, is read as untouched, and gets **fast-forwarded
-      to upstream, discarding the adaptation.** Two updates in a row is all it takes.
-      Observed: BlitzWork was updated twice (`bc41f9c → 54723bc`, then `→ 54bd698`). The first run reported
-      `merged: 8` and preserved everything. The second reported `updated: 9` and reverted six adapted bundle
-      files plus `docs/plans/ROADMAP.md` and `docs/plans/PRODUCTION-BACKLOG.md` — the latter two being that
-      project's real plans, replaced by the generic templates, 328 lines deleted. Recovered from the project's
-      own git HEAD; **a project not under git would have lost them outright.** Zero conflicts were reported
-      both times, so nothing in the output hinted at it.
-      The fix has to distinguish "untouched since install" from "equal to what we last wrote", which are not
-      the same claim once a merge has happened. Options: record the UPSTREAM sha the file derived from
-      alongside the local sha (then untouched = local matches upstream-at-install), or record a `merged: true`
-      flag per file so a merged file never takes the fast-forward path. **Prefer the first** — the second
-      remembers a verdict where the first remembers a fact. Needs a regression test driving two consecutive
-      updates over an adapted file; `test_update.js` currently covers one update per fixture, which is exactly
-      why this survived. **Until it's fixed, `/update-goodbehavior` on a project with local adaptations should
-      diff the result against the project's VCS before anything else.**
-
 - [ ] **Skip the un-evaluable Sigma rules at compile time, with a named reason each.** The 2026-10-02 entry
       below made the `commands` feed quiet by lane and by mute, which is the right fix for the *interruption*.
       It does not fix the *corpus*: ten rules whose signal lives in fields a `PreToolUse` hook never sees are
@@ -54,6 +34,30 @@ not deleted, it just stops competing with live work for the top of the file.
 
 Newest first. Each entry is kept whole: the reasoning that produced a rule is the durable part, and a
 summary of it would not survive contact with the next person asking "why is this rule here?"
+
+- **2026-10-07 — a merged file was reverted by the NEXT update** (data loss, found live 2026-10-02). `update.js`
+  classifies a file as "untouched since install" by comparing the local file's sha256 to the manifest's.
+  After a 3-way **merge**, it refreshes the manifest sha to the *merged* (locally-adapted) content — so on
+  the next run that adapted file matches its manifest sha, is read as untouched, and gets **fast-forwarded
+  to upstream, discarding the adaptation.** Two updates in a row is all it takes.
+  Observed: BlitzWork was updated twice (`bc41f9c → 54723bc`, then `→ 54bd698`). The first run reported
+  `merged: 8` and preserved everything. The second reported `updated: 9` and reverted six adapted bundle
+  files plus `docs/plans/ROADMAP.md` and `docs/plans/PRODUCTION-BACKLOG.md` — the latter two being that
+  project's real plans, replaced by the generic templates, 328 lines deleted. Recovered from the project's
+  own git HEAD; **a project not under git would have lost them outright.** Zero conflicts were reported
+  both times, so nothing in the output hinted at it.
+  The fix has to distinguish "untouched since install" from "equal to what we last wrote", which are not
+  the same claim once a merge has happened. Options: record the UPSTREAM sha the file derived from
+  alongside the local sha (then untouched = local matches upstream-at-install), or record a `merged: true`
+  flag per file so a merged file never takes the fast-forward path. **Prefer the first** — the second
+  remembers a verdict where the first remembers a fact. Needs a regression test driving two consecutive
+  updates over an adapted file; `test_update.js` currently covers one update per fixture, which is exactly
+  why this survived.
+  Fixed: manifest entries carry `upstreamSha256`, the upstream content the local file derived from, and
+  that is what the fast-forward test compares against. A merge advances it to theirs while `sha256`
+  follows the merged file, so the two differ exactly when a file is adapted. Manifests predating the
+  field fall back to the base blob. `tests/test_update_twice.js` drives two consecutive updates plus
+  the legacy-manifest path, and fails on the pre-fix script.
 
 - **2026-10-02 — a detection corpus borrowed from another context is not evidence in yours** (surfaced by
   the user, not by a test: "it has been hitting non-destructive non-invasive calls and has been preventing

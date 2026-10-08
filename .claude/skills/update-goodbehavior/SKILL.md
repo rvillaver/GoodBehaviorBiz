@@ -26,10 +26,16 @@ The merge mechanics are deterministic and live in the source repo. **Run them, d
 node <source>/scripts/update.js --target <project>     # add --dry-run first to preview
 ```
 Per tracked file it does exactly: **theirs** = `NEW:<from>`, **base** = `<sourceCommit>:<from>`, **ours** = the local
-file; sha256-match → fast-forward (**updated**); otherwise `git merge-file` 3-way → **merged** or **conflict** (markers
-written, manifest sha left stale so a post-resolution re-run reconciles); upstream-removed files are **kept** locally
-and reported; locally-missing tracked files are **restored**. It refreshes the manifest (sha256s, `sourceCommit=NEW`,
-`updatedAt`) and prints a JSON report; exit 2 means conflicts need the human. It never touches `settings.json`.
+file; match against `upstreamSha256` → fast-forward (**updated**); otherwise `git merge-file` 3-way → **merged** or
+**conflict** (markers written, both shas left stale so a post-resolution re-run reconciles); upstream-removed files are
+**kept** locally and reported; locally-missing tracked files are **restored**. It refreshes the manifest
+(`sha256`/`upstreamSha256`, `sourceCommit=NEW`, `updatedAt`) and prints a JSON report; exit 2 means conflicts need the
+human. It never touches `settings.json`.
+
+**The fast-forward test is `upstreamSha256`, never `sha256`.** `sha256` is what is on disk; `upstreamSha256` is the
+upstream content that file derived from, and a merge moves them apart. Comparing against `sha256` read an adapted file
+as untouched on the next run and fast-forwarded the adaptation away. Manifests predating the field fall back to the
+base blob.
 
 Your judgment on top of the report:
 - **Conflicts** — walk the user through each marked file. **Don't resolve silently.**

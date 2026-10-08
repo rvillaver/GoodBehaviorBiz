@@ -3,6 +3,23 @@
 Every entry here is a unit a downstream project will 3-way-merge via `/update-goodbehavior` — write entries so an
 adopter skimming before an update knows what's coming and why.
 
+## 2026-10-07 — a merged file is no longer reverted by the next update
+
+**`update.js` could discard a local adaptation on the second consecutive update, reporting zero conflicts both
+times.** It classified a file as untouched by comparing the local sha256 to the manifest's, but a clean 3-way
+merge refreshes that sha to the *merged* content — so the next run read the adapted file as pristine and
+fast-forwarded it to upstream. Observed live on a real project: the second run reverted six adapted bundle files
+plus that project's `ROADMAP.md` and `PRODUCTION-BACKLOG.md`, recovered only from its own git history.
+
+- **Manifest entries now carry `upstreamSha256`** — the upstream content the local file derived from — and the
+  fast-forward test compares against that. `sha256` still tracks what is on disk, so the two differ exactly when
+  a file is adapted.
+- **Existing manifests need no migration.** When `upstreamSha256` is absent the updater falls back to the base
+  blob, the same fact read from the source repo, so an adoptee is protected on its first run after this and
+  backfilled for later ones. On conflict both shas stay stale, keeping the re-run on the merge path.
+- **`tests/test_update_twice.js`** drives two consecutive updates over one adapted file plus the legacy-manifest
+  path. `test_update.js` covers one update per fixture, which is why this survived.
+
 ## 2026-10-02 — the Sigma feed stops asking in the fast lane, and a rule can be muted
 
 **The `commands` feed was 100% of the guard's interruptions, and every one was benign.** Across two real
