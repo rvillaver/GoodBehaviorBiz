@@ -8,10 +8,11 @@
  *
  * Usage: node scripts/update.js --target /path/to/project [--source /override/path] [--dry-run] [--fetch]
  *
- * Guarantees: never touches settings.json; a file whose sha256 matches the manifest is fast-forwarded;
- * adapted files are 3-way merged (conflicts written WITH markers + reported, sha256 left stale so a
- * re-run after resolution reconciles cleanly); files removed upstream are kept locally + reported;
- * manifest sourceCommit/updatedAt/sha256s refreshed for everything cleanly updated or merged.
+ * Guarantees: never touches settings.json; a file still byte-identical to the upstream content it derived
+ * from (manifest upstreamSha256) is fast-forwarded; every other file is 3-way merged (conflicts written
+ * WITH markers + reported, both shas left stale so a re-run after resolution merges rather than
+ * fast-forwards); files removed upstream are kept locally + reported; manifest
+ * sourceCommit/updatedAt/sha256/upstreamSha256 refreshed for everything cleanly updated or merged.
  * Exit code: 0 clean (even if already up to date), 1 fatal, 2 completed WITH conflicts.
  */
 "use strict";
@@ -118,18 +119,26 @@ function main() {
       if (!dryRun) {
         fs.mkdirSync(path.dirname(localPath), { recursive: true });
         fs.writeFileSync(localPath, theirs);
-        entry.sha256 = sha256Bytes(theirs);
+        entry.sha256 = entry.upstreamSha256 = sha256Bytes(theirs);
       }
       report.restored.push(key); continue;
     }
     const ours = fs.readFileSync(localPath);
-    if (ours.equals(theirs)) { entry.sha256 = sha256Bytes(ours); report.unchanged.push(key); continue; }
-    if (sha256Bytes(ours) === entry.sha256) {
-      // untouched since install → fast-forward to upstream
-      if (!dryRun) { fs.writeFileSync(localPath, theirs); entry.sha256 = sha256Bytes(theirs); }
-      report.updated.push(key); continue;
+    const theirsSha = sha256Bytes(theirs);
+    if (ours.equals(theirs)) {
+      entry.sha256 = theirsSha; entry.upstreamSha256 = theirsSha;
+      report.unchanged.push(key); continue;
     }
     const base = gitShow(source, baseCommit, srcRel);
+    // "Untouched since install" must be tested against the UPSTREAM content this file derived from, never
+    // against entry.sha256 — a clean merge rewrites that to the merged, locally-adapted content, so the next
+    // run would read the adaptation as pristine and fast-forward it away. Manifests written before
+    // upstreamSha256 existed fall back to the base blob, which is the same fact read from the repo.
+    const upstreamSha = entry.upstreamSha256 || (base !== null ? sha256Bytes(base) : null);
+    if (upstreamSha !== null && sha256Bytes(ours) === upstreamSha) {
+      if (!dryRun) { fs.writeFileSync(localPath, theirs); entry.sha256 = theirsSha; entry.upstreamSha256 = theirsSha; }
+      report.updated.push(key); continue;
+    }
     if (base === null) {
       report.warnings.push(`${key}: no base at ${baseCommit.slice(0, 8)} — left as-is; merge by hand`);
       continue;
@@ -137,8 +146,10 @@ function main() {
     const [merged, clean] = mergeFile(ours, base, theirs);
     if (!dryRun) {
       fs.writeFileSync(localPath, merged);
-      if (clean) entry.sha256 = sha256Bytes(merged);
-      // on conflict: leave the stale sha256 so a post-resolution re-run reconciles cleanly
+      // sha256 tracks the merged file; upstreamSha256 advances to what upstream now says, so the next run
+      // sees adapted-vs-upstream and merges again. On conflict both stay stale: the file still holds markers,
+      // and a post-resolution re-run must take the merge path, not the fast-forward one.
+      if (clean) { entry.sha256 = sha256Bytes(merged); entry.upstreamSha256 = theirsSha; }
     }
     (clean ? report.merged : report.conflict).push(key);
   }

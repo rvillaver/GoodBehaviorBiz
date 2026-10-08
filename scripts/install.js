@@ -16,8 +16,9 @@
  *
  * Guarantees: never clobbers (existing files skipped + reported); installs only under <target>/;
  * settings.json merged not overwritten (existing event entries never duplicated, deduped per hook
- * file); manifest at <target>/.claude/goodbehavior/manifest.json records source, sourceCommit and a
- * sha256 per file AS INSTALLED. Reports JSON on stdout: {"created":[],"skipped":[],"warnings":[]}.
+ * file); manifest at <target>/.claude/goodbehavior/manifest.json records source, sourceCommit and, per
+ * file, sha256 AS INSTALLED plus upstreamSha256, the upstream content it derived from.
+ * Reports JSON on stdout: {"created":[],"skipped":[],"warnings":[]}.
  */
 "use strict";
 const fs = require("fs");
@@ -190,7 +191,10 @@ function main() {
       fs.mkdirSync(path.dirname(dst), { recursive: true });
       fs.copyFileSync(path.join(source, srcRel), dst);
       if (Object.values(HOOKS).some((def) => def.rel === tgtRel)) fs.chmodSync(dst, 0o755);
-      manifest.files[tgtRel] = { from: srcRel.split(path.sep).join("/"), sha256: sha256(dst) };
+      const installed = sha256(dst);
+      // sha256 = what is on disk now; upstreamSha256 = what upstream gave us. Equal at install, and they
+      // diverge the moment a merge writes adapted content. update.js tests "untouched" against the second.
+      manifest.files[tgtRel] = { from: srcRel.split(path.sep).join("/"), sha256: installed, upstreamSha256: installed };
     }
     report.created.push(tgtRel);
   }
