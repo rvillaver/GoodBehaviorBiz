@@ -14,7 +14,7 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
-const PROFILES = ["development", "analysis", "research", "creative"];
+const PROFILES = ["development", "analysis", "research", "creative", "devops"];
 const SLOTS = ["**the-real-thing:**", "**verify:**", "**evidence:**"];
 
 const INVARIANT_FILES = [
